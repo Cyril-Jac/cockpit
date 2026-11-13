@@ -4,7 +4,7 @@
 const CFG = {
   url: "https://nnfrnhyitpbrbpjnmgfp.supabase.co",
   key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5uZnJuaHlpdHBicmJwam5tZ2ZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ1NDAxODMsImV4cCI6MjExMDExNjE4M30.z8W82Iud-IjFmLd-Eu-nQHA_sSNrvP7Ti0nDpeOWZe0",
-  version: "1.3.3",
+  version: "1.3.4",
 };
 const TEST = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) && new URLSearchParams(location.search).has("test");
 const $ = (s, el = document) => el.querySelector(s);
@@ -106,6 +106,10 @@ const ABFRAGEN = () => {
     steuerauto: (q) => q.from("v_steuer_auto").select("*"),
     wscheck: (q) => q.from("v_wertschriften_check").select("*"),
     strategie: (q) => q.from("anlage_strategie").select("*"),
+    news: (q) => q.from("news").select("*").neq("status", "irrelevant").gte("erstellt", new Date(Date.now() - 21 * 864e5).toISOString()).order("erstellt", { ascending: false }).limit(80),
+    watchlist: (q) => q.from("watchlist").select("*"),
+    vlauf: (q) => q.from("v_vermoegen_lauf").select("*"),
+    vprognose: (q) => q.from("v_vermoegen_prognose").select("strategie,datum,p10,p25,p50,p75,p90,einbezahlt").order("datum"),
     kurse: (q) => q.from("kurse").select("*").order("pruefung", { ascending: true, nullsFirst: false }),
     abgaben: (q) => q.from("uni_abgaben").select("*").order("frist"),
     ma: (q) => q.from("aufgaben").select("id,titel,frist,status").ilike("titel", "Frist: MA-Meilenstein%").order("frist"),
@@ -407,6 +411,8 @@ function seiteHeute() {
   if (ents.length) { const fr = ents.filter((e) => e.frist).sort((a, b) => new Date(a.frist) - new Date(b.frist))[0];
     h += `<li><span class="ic">${IC.filter}</span><div><b>${ents.length} Entscheid${ents.length > 1 ? "e" : ""} für dich</b><div class="meta">${fr ? "erster bis " + fristText(fr.frist, true) : "ohne Frist"} · unten wischen</div></div></li>`; }
   if (bitten.length) h += `<li><span class="ic warn">!</span><div><b>Manager braucht dich: ${bitten.length}×</b><div class="meta">${bitten.slice(0, 2).map((a) => esc(a.titel.replace(/^\s*(für den manager|freischalten)\s*:?\s*/i, ""))).join(" · ")}</div></div></li>`;
+  const wichtig = (d.news || []).filter((n) => n.status === "neu" && n.relevanz === 3 && Date.now() - new Date(n.erstellt) < 2 * 864e5);
+  if (wichtig.length) h += `<li class="tippbar" data-gehe="depot"><span class="ic warn">!</span><div><b>Newsfilter: ${wichtig.length} wichtige Meldung${wichtig.length > 1 ? "en" : ""}</b><div class="meta">${esc((wichtig[0].firma || wichtig[0].symbol || "") + ": " + wichtig[0].titel).slice(0, 90)}</div></div></li>`;
   if (erledigt.length) h += `<li><span class="ic gut">${IC.ok}</span><div><b>Für dich erledigt: ${erledigt.length} in 7 Tagen</b><div class="meta">${esc(erledigt[0].titel.slice(0, 70))}</div></div></li>`;
   h += `</ul></section>`;
   h += einschaetzungKarte("heute");
@@ -719,26 +725,85 @@ function kompassKarte() {
     sek("Steuerfreie Kursgewinne", verletzt ? `<span class="chip gelb">${verletzt} nicht erfüllt</span>` : `<span class="chip gruen">erfüllt</span>`) +
     `<div class="karte">${krit.map(zeile).join("")}<div class="klein muted" style="margin-top:8px">Safe-Haven-Kriterien der ESTV (KS 36). Sind alle erfüllt, gilt der Handel sicher als privat und Kursgewinne bleiben steuerfrei. Fehlt eines, wird der Einzelfall beurteilt: bei grösserem Trading-Topf droht Einkommenssteuer plus AHV auf Gewinne.${verletzt ? " Hebel: CFD und kurze Haltedauer betreffen nur den Trading-Topf; der Kern ist unproblematisch." : ""}</div></div>`;
 }
-function vermoegenKarte() {
-  const d = S.d || {}, pos = d.depot || [];
-  const start = pos.reduce((s, p) => s + +p.wert_chf, 0) + +((d.depotverlauf || []).slice(-1)[0]?.cash_chf || 0);
-  const sz = strat("rendite_szenarien") || { vorsichtig: 0.03, basis: 0.06, gut: 0.09 };
-  const rate = S.vmRate ?? Math.round((+(strat("sparrate_quartal") ?? 2000)) / 3), r = S.vmRendite ?? sz.basis;
-  return sek("Vermögen in Zukunft") + `<div class="karte"><div class="vm-regler">
-    <label><span>Sparrate <b id="vm-rate-w">${chf0(rate)}</b> pro Monat</span><input type="range" id="vm-rate" min="0" max="4000" step="50" value="${rate}"></label>
-    <label><span>Rendite <b id="vm-r-w">${pct(r, 1)}</b> pro Jahr</span><input type="range" id="vm-r" min="0" max="0.12" step="0.005" value="${r}"></label></div>
-    <div id="vm-erg">${vmErgebnis(start, rate, r)}</div>
-    <div class="klein muted" style="margin-top:8px">Start: Depot heute ${chf0(start)} (ohne 3a und Pensionskasse). Nominal, vor Steuern und Inflation. Szenarien aus der Strategie: ${pct(sz.vorsichtig)} / ${pct(sz.basis)} / ${pct(sz.gut)}.</div></div>`;
+
+// ---------------------------------------------------------------- Vermögensprognose (Monte Carlo, Python auf GitHub Actions)
+const tk = (v) => (v == null || !isFinite(v) ? "–" : `${nf0.format(Math.round(v / 1000))}<small>k</small>`);
+function prognoseKarte() {
+  const d = S.d || {}, l = (d.vlauf || [])[0], pk = d.vprognose || [];
+  if (!l || !pk.length) return sek("Vermögen in Zukunft") + `<div class="karte"><div class="leer">Die Prognose rechnet jeden Sonntag und am 2. des Monats.</div></div>`;
+  const k = l.kennzahlen || {}, a = k.plan_2x || {}, b = k.vergleich_1x || {}, an = l.annahmen || {}, m = an.markt || {};
+  let h = sek("Vermögen in Zukunft", `<span class="chip">Stand ${datumKurz(l.erstellt)}</span>`);
+  h += zeileKpi([5, 10, 20].map((j) => ({ name: `in ${j} Jahren`, wert: tk(a[`j${j}`]?.p50), sub: `${tk(a[`j${j}`]?.p10)} bis ${tk(a[`j${j}`]?.p90)}<br>eingezahlt ${tk(a[`j${j}`]?.einbezahlt)}` })));
+  h += `<div class="karte"><div class="chart" id="c-faecher"></div>
+    <div class="legende"><span style="--c:var(--s1)">Plan (Kern 2x), Median</span><span style="--c:color-mix(in srgb, var(--s1) 35%, transparent)">80 % der Szenarien</span><span style="--c:var(--s4)">Kern 1x, Median</span><span style="--c:var(--text-3)">eingezahlt</span></div></div>`;
+  const z = (x) => (x == null ? "–" : pct(x));
+  const zeilen = [
+    ["Median in 20 Jahren", tk(a.j20?.p50), tk(b.j20?.p50)],
+    ["Schlechteste 10 %", tk(a.j20?.p10), tk(b.j20?.p10)],
+    ["Beste 10 %", tk(a.j20?.p90), tk(b.j20?.p90)],
+    ["Einmal −50 % vom Höchststand", z(a.p_drawdown_50), z(b.p_drawdown_50)],
+    ["Ende unter dem Eingezahlten", z(k.p_2x_unter_einbezahlt), z(k.p_1x_unter_einbezahlt)],
+    ["100k erreicht (Median)", a.median_100000 ? new Date(a.median_100000).getFullYear() : "–", b.median_100000 ? new Date(b.median_100000).getFullYear() : "–"],
+  ];
+  const mehr = a.j20 && b.j20 ? a.j20.p50 / b.j20.p50 - 1 : null;
+  h += `<div class="karte"><div class="vgl"><div class="k"></div><div class="k">Plan 2x</div><div class="k">Kern 1x</div>${zeilen.map(([n, x, y]) => `<div>${n}</div><div class="w">${x}</div><div class="w">${y}</div>`).join("")}</div>
+    <div class="details" style="margin-top:10px">${mehr != null ? `Der Hebel verändert den Median nach 20 Jahren um ${mehr >= 0 ? "+" : MINUS}${pct(Math.abs(mehr), 1)}, die Spannweite aber stark: Mit 2x liegt das schlechteste Zehntel bei ${tk(a.j20.p10)} statt ${tk(b.j20.p10)}, das beste bei ${tk(a.j20.p90)} statt ${tk(b.j20.p90)}. In ${pct(k.p_2x_besser)} der Szenarien schlägt 2x am Ende 1x.` : ""}</div>
+    <details class="details" data-k="vm-annahmen"${offen("vm-annahmen")}><summary>Annahmen</summary>
+      ${nf0.format(an.pfade || 0)} Szenarien über ${an.jahre || 20} Jahre (Python, GitHub Actions, jeden Sonntag und am 2. des Monats). Start ${datumKurz(an.start)}: Kern ${chf0(an.kern)}, Trading-Topf ${chf0(an.trading)}, Cash und Konto ${chf0(an.cash)}, 3a ${chf0(an.saeule3a)}.
+      Sparplan heute ${chf0(an.sparrate_heute_monat)}/Monat in den Kern; ab ${datumKurz(an.jobstart)} ${new Date(an.jobstart).getFullYear()} ${chf0(an.kern_monat_job)} Kern + ${chf0(an.saeule3a_monat_job)} 3a pro Monat, +${pct(an.wachstum)} pro Jahr (Annahme, bis ein Vertrag da ist).
+      Markt (nominal CHF): USA ${pct(m.usa?.mu, 1)} bei ${pct(m.usa?.sigma)} Schwankung, Trading-Topf ${pct(m.trading?.sigma)} Schwankung ohne Zusatzrendite, Hebel täglich 2x mit ${pct(m.finanzierung_hebel, 1)} Finanzierung und ${pct(m.ter_kern, 1)} TER, fette Ränder (t-Verteilung). Inflation ${pct(m.inflation)}: Median nach 20 Jahren in heutiger Kaufkraft ${tk(a.j20?.p50_real)}.
+      Annahmen ändern: Nachricht an den Manager (z. B. echter Lohn, 3a-Stand).</details></div>`;
+  return h;
 }
-function vmWert(start, rate, r, jahre) { const m = r / 12, n = jahre * 12; return start * Math.pow(1 + m, n) + (m ? rate * (Math.pow(1 + m, n) - 1) / m : rate * n); }
-function vmErgebnis(start, rate, r) {
-  return zeileKpi([5, 10, 20].map((j) => { const v = vmWert(start, rate, r, j), ein = start + rate * 12 * j; return { name: `in ${j} Jahren`, wert: `${nf0.format(Math.round(v / 1000))}<small>k CHF</small>`, sub: `davon Ertrag ${chf0(v - ein)}` }; }));
+function faecher(id) {
+  const el = document.getElementById(id); if (!el) return;
+  const pk = S.d?.vprognose || [], a = pk.filter((p) => p.strategie === "plan_2x"), b = pk.filter((p) => p.strategie === "vergleich_1x");
+  if (!a.length) return;
+  const W = Math.max(300, el.clientWidth || 340), H = 210, L = 42, R = 8, T = 8, B = 22;
+  const xs = a.map((p) => +new Date(p.datum)), x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const ticks = stufen(0, Math.max(...a.map((p) => +p.p90)), 4), max = ticks[ticks.length - 1];
+  const X = (t) => L + ((t - x0) / (x1 - x0)) * (W - L - R), Y = (v) => T + (1 - v / max) * (H - T - B);
+  const pfad = (arr, k) => arr.map((p, i) => `${i ? "L" : "M"}${X(+new Date(p.datum)).toFixed(1)},${Y(+p[k]).toFixed(1)}`).join("");
+  const band = (lo, hi) => pfad(a, hi) + a.slice().reverse().map((p) => `L${X(+new Date(p.datum)).toFixed(1)},${Y(+p[lo]).toFixed(1)}`).join("") + "Z";
+  const jahre = [...new Set(a.map((p) => new Date(p.datum).getFullYear()))].filter((j, i, arr) => (j - arr[0]) % 5 === 0 || i === arr.length - 1);
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img" aria-label="Vermögensprognose 20 Jahre: Median und Bandbreite">
+    ${ticks.map((t) => `<line x1="${L}" x2="${W - R}" y1="${Y(t)}" y2="${Y(t)}" stroke="var(--line, rgba(127,127,127,.18))"/><text x="${L - 6}" y="${Y(t) + 4}" text-anchor="end" font-size="11" fill="var(--text-3)">${t ? nf0.format(t / 1000) + "k" : "0"}</text>`).join("")}
+    ${jahre.map((j) => { const x = X(+new Date(j, 0, 1)); return x >= L ? `<text x="${x}" y="${H - 6}" text-anchor="middle" font-size="11" fill="var(--text-3)">${j}</text>` : ""; }).join("")}
+    <path d="${band("p10", "p90")}" fill="var(--s1)" opacity=".14"/><path d="${band("p25", "p75")}" fill="var(--s1)" opacity=".22"/>
+    <path d="${pfad(a, "einbezahlt")}" fill="none" stroke="var(--text-3)" stroke-width="1.5" stroke-dasharray="2 3"/>
+    ${b.length ? `<path d="${pfad(b, "p50")}" fill="none" stroke="var(--s4)" stroke-width="2" stroke-dasharray="6 4"/>` : ""}
+    <path d="${pfad(a, "p50")}" fill="none" stroke="var(--s1)" stroke-width="2.5"/></svg>`;
 }
-function vmBinden() {
-  const d = S.d || {}, start = (d.depot || []).reduce((s, p) => s + +p.wert_chf, 0) + +((d.depotverlauf || []).slice(-1)[0]?.cash_chf || 0);
-  const a = $("#vm-rate"), b = $("#vm-r"); if (!a || !b) return;
-  const neu = () => { S.vmRate = +a.value; S.vmRendite = +b.value; $("#vm-rate-w").textContent = chf0(S.vmRate); $("#vm-r-w").textContent = pct(S.vmRendite, 1); $("#vm-erg").innerHTML = vmErgebnis(start, S.vmRate, S.vmRendite); };
-  a.oninput = neu; b.oninput = neu;
+
+// ---------------------------------------------------------------- Newsfilter (Routine 2x täglich, Saxo-Berater wöchentlich)
+const NEWS_ART = { bestand: ["Bestand", "blau"], watchlist: ["Watchlist", ""], trend: ["Trend", "lila"], idee: ["Neue Firma", "gruen"], vorschlag: ["Vorschlag", "gelb"], termin: ["Termin", "blau"] };
+const WIRKUNG = { positiv: ["▲", "gut"], negativ: ["▼", "schlecht"], gemischt: ["◆", ""], neutral: ["·", ""] };
+function newsKarte() {
+  const alle = (S.d?.news || []).filter((x) => x.status !== "irrelevant");
+  const f = S.newsFilter || "alle";
+  const passt = (x) => f === "alle" || (f === "ideen" ? ["idee", "trend"].includes(x.art) : f === "bestand" ? ["bestand", "watchlist"].includes(x.art) : x.art === f);
+  const sicht = alle.filter(passt).sort((a, z) => (z.status === "neu") - (a.status === "neu") || z.relevanz - a.relevanz || new Date(z.erstellt) - new Date(a.erstellt));
+  const neu = alle.filter((x) => x.status === "neu").length;
+  const wl = new Set((S.d?.watchlist || []).filter((w) => w.aktiv).map((w) => w.symbol));
+  let h = sek("Newsfilter", neu ? `<span class="chip blau">${neu} neu</span>` : "");
+  h += `<div class="karte liste-karte"><div class="seg-schalter" style="margin:2px 2px 6px">${[["alle", "Alle"], ["bestand", "Bestand"], ["ideen", "Ideen"], ["vorschlag", "Vorschläge"]].map(([k, n]) => `<button class="${k === f ? "an" : ""}" data-newsf="${k}">${n}</button>`).join("")}</div>
+    <ul class="liste">${sicht.slice(0, S.alleNews ? 60 : 8).map((x) => `<li class="news ${x.status === "neu" ? "ungelesen" : ""}" data-news="${x.id}">
+      <div class="meta"><span class="chip ${NEWS_ART[x.art]?.[1] || ""}">${NEWS_ART[x.art]?.[0] || x.art}</span>${x.wirkung ? `<span class="${WIRKUNG[x.wirkung]?.[1] || ""}">${WIRKUNG[x.wirkung]?.[0] || ""}</span>` : ""}${x.relevanz === 3 ? '<span class="chip rot">wichtig</span>' : ""}<span>${esc(x.firma || x.symbol || "")}</span><span class="muted">${alter(x.erstellt)}</span></div>
+      <div class="titel">${x.url ? `<a ${linkAttr(x.url)}>${esc(x.titel)}</a>` : esc(x.titel)}</div>
+      ${x.kurz ? `<div class="details" style="margin-top:2px">${esc(x.kurz)}</div>` : ""}${x.handlung ? `<div class="handlung">→ ${esc(x.handlung)}</div>` : ""}
+      <div class="knoepfe-zeile">${x.status !== "gemerkt" ? `<button class="knopf" data-nakt="gemerkt">Merken</button>` : '<span class="chip gruen">gemerkt</span>'}${x.status === "neu" ? `<button class="knopf" data-nakt="gelesen">Gelesen</button>` : ""}<button class="knopf weg" data-nakt="irrelevant">Nicht relevant</button>${x.symbol && ["idee", "trend"].includes(x.art) && !wl.has(x.symbol) ? `<button class="knopf gut" data-nakt="watchlist">+ Watchlist</button>` : ""}</div></li>`).join("") || '<li class="leer">Der Newsfilter läuft um 06:33 und 18:33 und meldet nur, was zählt.</li>'}</ul>
+    ${sicht.length > 8 ? `<button class="knopf mehrzeigen" id="alle-news">${S.alleNews ? "Weniger" : `Alle ${sicht.length} zeigen`}</button>` : ""}
+    <div class="klein muted" style="padding:6px 4px 2px">«Nicht relevant» und «Merken» lernt der Filter: ähnliche Meldungen kommen seltener bzw. öfter.${wl.size ? ` Watchlist: ${[...wl].map((s) => s.split(":")[0]).join(", ")}.` : ""}</div></div>`;
+  return h;
+}
+async function newsAktion(id, akt) {
+  const x = (S.d?.news || []).find((n) => n.id === id); if (!x) return;
+  if (akt === "watchlist") {
+    const r = await schreiben((q) => q.from("watchlist").insert({ symbol: x.symbol, firma: x.firma, grund: x.titel, these: x.kurz, quelle: x.url }), `${x.firma || x.symbol} auf der Watchlist`);
+    if (!r.error) { (S.d.watchlist ||= []).push({ symbol: x.symbol, aktiv: true }); akt = "gemerkt"; } else return render();
+  }
+  const r = await schreiben((q) => q.from("news").update({ status: akt }).eq("id", id), akt === "irrelevant" ? "Ausgeblendet, der Filter lernt mit" : null);
+  if (!r.error) { x.status = akt; render(); }
 }
 
 // ---------------------------------------------------------------- Jobs
@@ -932,14 +997,15 @@ function seiteDepot() {
   h += sek("Depotwert") + `<div class="karte"><div class="chart" id="c-depot"></div></div>`;
   const ch = (S.d?.chancen || []).filter((c) => c.quelle !== "karriere");
   const art = { termin: ["Termin", "blau"], signal: ["Signal", "gruen"], idee: ["Idee", ""], risiko: ["Risiko", "rot"] };
+  h += newsKarte();
   h += kompassKarte();
-  h += vermoegenKarte();
-  h += sek("Chancen-Radar", ch.length) + `<div class="karte liste-karte">${ch.length ? `<ul class="liste">${ch.map((c) => `<li><div class="titel">${esc(c.titel)}</div><div class="meta"><span class="chip ${art[c.art]?.[1] || ""}">${art[c.art]?.[0] || c.art}</span>${c.symbol ? `<span class="chip">${esc(c.symbol)}</span>` : ""}${c.gueltig_bis ? "bis " + datumKurz(c.gueltig_bis) : ""}</div>${c.text ? `<details class="details" data-k="ch-${c.id}"${offen("ch-" + c.id)}><summary>Warum</summary>${esc(c.text)}</details>` : ""}</li>`).join("")}</ul>` : '<div class="leer">Der Manager füllt das Radar beim nächsten Lauf.</div>'}</div>`;
+  h += prognoseKarte();
+  h += sek("Termine und Signale", ch.length) + `<div class="karte liste-karte">${ch.length ? `<ul class="liste">${ch.map((c) => `<li><div class="titel">${esc(c.titel)}</div><div class="meta"><span class="chip ${art[c.art]?.[1] || ""}">${art[c.art]?.[0] || c.art}</span>${c.symbol ? `<span class="chip">${esc(c.symbol)}</span>` : ""}${c.gueltig_bis ? "bis " + datumKurz(c.gueltig_bis) : ""}</div>${c.text ? `<details class="details" data-k="ch-${c.id}"${offen("ch-" + c.id)}><summary>Warum</summary>${esc(c.text)}</details>` : ""}</li>`).join("")}</ul>` : '<div class="leer">Der Manager füllt das Radar beim nächsten Lauf.</div>'}</div>`;
   const tr = S.d?.trades || [];
   h += sek("Letzte Trades", tr.length) + `<div class="karte liste-karte"><ul class="liste">${tr.map((t) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(t.richtung)} ${esc(t.name || t.symbol)}</div><div class="meta">${datumKurz(t.datum)}${t.menge ? " · " + nf0.format(t.menge) + " Stk." : ""}</div></div><div class="r" data-privat>${chf(Math.abs(+t.betrag_chf || 0))}</div></div></li>`).join("")}</ul></div>`;
   return h;
 }
-function chartsDepot() { linie("c-depot", { punkte: (S.d?.depotverlauf || []).map((p) => ({ x: p.datum, y: +p.wert_chf })), aria: "Depotwert im Zeitverlauf" }); }
+function chartsDepot() { faecher("c-faecher"); linie("c-depot", { punkte: (S.d?.depotverlauf || []).map((p) => ({ x: p.datum, y: +p.wert_chf })), aria: "Depotwert im Zeitverlauf" }); }
 
 // ---------------------------------------------------------------- Uni
 function uniDaten() {
@@ -1094,8 +1160,11 @@ function binden() {
   $$(".aufgabe .haken[data-akt]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); const li = b.closest(".aufgabe"); li.classList.add("weg"); setTimeout(() => aufgabeAktion(li.dataset.id, "erledigt"), 160); });
   $$(".aufgabe").forEach(wischen);
   $$("[data-oeffne]").forEach((x) => x.onclick = () => aufgabeBlatt(x.dataset.oeffne));
+  $$("[data-gehe]").forEach((x) => x.onclick = () => { S.tab = x.dataset.gehe; speicher.set("cockpit-tab", S.tab); window.scrollTo(0, 0); render(); });
   $$("[data-beleg]").forEach((x) => x.onclick = () => belegUmschalten(x.dataset.beleg));
-  vmBinden();
+  $$("[data-newsf]").forEach((x) => x.onclick = () => { S.newsFilter = x.dataset.newsf; render(); });
+  $$("[data-nakt]").forEach((x) => x.onclick = () => newsAktion(x.closest("[data-news]").dataset.news, x.dataset.nakt));
+  const an = $("#alle-news"); if (an) an.onclick = () => { S.alleNews = !S.alleNews; render(); };
   $$(".entscheid [data-antwort]").forEach((b) => b.onclick = () => { const k = b.closest(".entscheid"); entscheidAntwort(k.dataset.id, b.dataset.antwort, $(".kommentar", k)?.value.trim() || null); });
   $$("[data-ms-akt]").forEach((b) => b.onclick = () => meilenstein(b.closest("[data-ms]").dataset.ms, b.dataset.msAkt));
   $$("[data-privat]").forEach((x) => {

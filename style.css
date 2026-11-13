@@ -421,6 +421,23 @@ nav.tabs button { font-size: 11px; }
 .regel .n { flex: 1; } .regel .i { color: var(--text-2); text-align: right; font-variant-numeric: tabular-nums; }
 .ampel { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 10px; background: var(--text-3); }
 .ampel.gut { background: var(--good); } .ampel.schlecht { background: var(--warn); }
-.vm-regler { display: grid; gap: 10px; margin-bottom: 10px; }
-.vm-regler label { display: grid; gap: 4px; font-size: 14px; color: var(--text-2); }
-.vm-regler input[type=range] { width: 100%; min-height: 28px; accent-color: var(--accent-fill, #1f6fd6); }
+/* 1.3.4 Prognose + Newsfilter */
+.vgl { display: grid; grid-template-columns: 1fr auto auto; gap: 7px 14px; font-size: 14px; align-items: baseline; }
+.vgl .k { font-size: 12px; color: var(--text-3); text-align: right; } .vgl .k:first-child { text-align: left; }
+.vgl .w { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.news { padding-top: 10px; padding-bottom: 10px; } .news .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.news .titel { font-weight: 600; margin-top: 4px; } .news .titel a { color: inherit; text-decoration: none; }
+.news.ungelesen .titel::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent-fill, #1f6fd6); margin-right: 6px; vertical-align: 2px; }
+.news .handlung { font-size: 14px; margin-top: 4px; font-weight: 500; }
+.news .gut { color: var(--good); } .news .schlecht { color: var(--crit); }
+/* 1.3.4 Feinschliff schmale Bildschirme */
+.sek { flex-wrap: wrap; row-gap: 2px; }
+.sek .chip { font-size: 11px; }
+@media (max-width: 360px) {
+  .kpi { padding: 10px 8px 9px; }
+  .kpi .w { font-size: 17px; }
+  .kpi .w small { font-size: 11px; }
+  .reihe .r { flex: 0 1 auto; }
+}
+.hebel .reihe { flex-wrap: wrap; gap: 2px 8px; }
+.regel .i { min-width: 0; overflow-wrap: anywhere; }
