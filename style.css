@@ -236,3 +236,31 @@ textarea:focus, input:focus { border-color: var(--accent); }
 
 @media (min-width: 560px) { .kacheln { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+
+/* Speicher (V9): Seiten und Datenbanken */
+.sp-liste li { padding: 9px 0; border-bottom: 1px solid var(--line); list-style: none; }
+.sp-liste li:last-child { border-bottom: 0; }
+.sp-liste a { text-decoration: none; color: var(--text); font-weight: 500; }
+.sp-suche { width: 100%; box-sizing: border-box; font: inherit; font-size: 16px; padding: 10px 12px; border-radius: 12px;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--text); margin: 4px 0 10px; }
+.sp-chips { flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.sp-chips .chip { border: 1px solid var(--line); background: transparent; color: var(--text-2); font: inherit; font-size: 13px; padding: 4px 10px; border-radius: 999px; }
+.sp-chips .chip.an { background: var(--accent); border-color: var(--accent); color: #fff; }
+a.reihe { text-decoration: none; color: inherit; display: flex; }
+.sp-seite h2 { margin: 4px 0 12px; }
+.sp-props { display: grid; grid-template-columns: minmax(90px, 34%) 1fr; gap: 6px 12px; margin: 0 0 14px; font-size: 14px; }
+.sp-props dt { color: var(--text-3); }
+.sp-props dd { margin: 0; overflow-wrap: anywhere; }
+.sp-inhalt { font-size: 15px; line-height: 1.5; overflow-wrap: anywhere; }
+.sp-inhalt h2, .sp-inhalt h3, .sp-inhalt h4 { margin: 18px 0 6px; }
+.sp-inhalt p { margin: 6px 0; }
+.sp-inhalt ul, .sp-inhalt ol { margin: 6px 0; padding-left: 20px; }
+.sp-inhalt blockquote { margin: 8px 0; padding: 6px 10px; border-left: 3px solid var(--accent); background: var(--surface-2); border-radius: 0 8px 8px 0; }
+.sp-inhalt pre { white-space: pre-wrap; background: var(--surface-2); padding: 10px; border-radius: 8px; font-size: 13px; }
+.sp-inhalt code { background: var(--surface-2); padding: 1px 4px; border-radius: 4px; font-size: 0.92em; }
+.sp-inhalt hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
+.sp-tab { overflow-x: auto; margin: 8px 0; }
+.sp-tab table { border-collapse: collapse; font-size: 13px; min-width: 100%; }
+.sp-tab th, .sp-tab td { border: 1px solid var(--line); padding: 5px 7px; text-align: left; vertical-align: top; }
+.sp-tab th { background: var(--surface-2); }
+.sp-todo { margin: 4px 0; }

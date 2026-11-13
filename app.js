@@ -60,6 +60,7 @@ const IC = {
   filter: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16l-6 7.5V19l-4-2v-4.5z"/></svg>',
   ok: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>',
   weg: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  buch: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4.5h10a3 3 0 0 1 3 3V20H8a3 3 0 0 1-3-3z"/><path d="M5 17a3 3 0 0 1 3-3h10"/></svg>',
   uhr: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8"/><path d="M12 8v4l2.5 2"/></svg>',
 };
 const TABS = [
@@ -470,27 +471,31 @@ function seitePlan() {
 function kopf(titel) {
   const sync = S.d?.sync || [];
   const alt = (q, std) => { const x = sync.find((s) => s.quelle === q); return !x ? "fehler" : !x.ok ? "fehler" : (Date.now() - new Date(x.zuletzt)) / 36e5 > std ? "alt" : ""; };
-  const zustand = [alt("notion", 1), alt("finanzen", 30), alt("depot", 30)];
+  const zustand = [alt("speicher", 1), alt("finanzen", 30), alt("depot", 30)];
   const schlecht = zustand.includes("fehler") ? "fehler" : zustand.includes("alt") ? "alt" : "";
   return `<header class="kopf"><div><h1>${titel}</h1><div class="unter"><span class="punkt ${schlecht}"></span> ${S.offline ? "offline · " : ""}Stand ${S.geladen ? alter(S.geladen) : "–"}</div></div>
-    <div class="rechts">${S.tab === "heute" ? `<button class="rund" id="b-filter" aria-label="Ausgeblendetes">${IC.filter}</button>` : ""}<button class="rund" id="b-neu" aria-label="Neu laden">${IC.neu}</button></div></header>`;
+    <div class="rechts">${S.tab === "heute" ? `<button class="rund" id="b-filter" aria-label="Ausgeblendetes">${IC.filter}</button>` : ""}<button class="rund" id="b-speicher" aria-label="Speicher: alle Seiten und Datenbanken">${IC.buch}</button><button class="rund" id="b-neu" aria-label="Neu laden">${IC.neu}</button></div></header>`;
 }
 function render() {
   const app = $("#app");
   if (!S.d) { app.innerHTML = `<div class="login"><div class="box"><p>Lade …</p></div></div>`; return; }
   const [key, name] = TABS.find((t) => t[0] === S.tab) || TABS[0];
   const titel = { heute: `${TAGE[new Date().getDay()]} ${new Date().getDate()}. ${MONATE[new Date().getMonth()]}`, jobs: "Jobs", geld: "Geld", depot: "Depot", uni: "Uni", plan: "5 Jahre" }[key] || name;
-  const seite = { heute: seiteHeute, jobs: seiteJobs, geld: seiteGeld, depot: seiteDepot, uni: seiteUni, plan: seitePlan }[key]();
+  const sp = !!S.sp;
+  const seite = sp ? seiteSpeicher() : { heute: seiteHeute, jobs: seiteJobs, geld: seiteGeld, depot: seiteDepot, uni: seiteUni, plan: seitePlan }[key]();
   const y = window.scrollY;
-  app.innerHTML = `${kopf(titel)}<main>${seite}</main>
+  app.innerHTML = `${kopf(sp ? "Speicher" : titel)}<main>${seite}</main>
     <button class="plus" id="b-plus" aria-label="Neu">${IC.plus}</button>
-    <nav class="tabs">${TABS.map(([k, n]) => `<button class="${k === key ? "an" : ""}" data-tab="${k}">${IC[k]}<span>${n}</span></button>`).join("")}</nav>`;
-  if (render.letzterTab === key) window.scrollTo(0, y); render.letzterTab = key;
-  ({ jobs: chartsJobs, geld: chartsGeld, depot: chartsDepot }[key] || (() => {}))();
+    <nav class="tabs">${TABS.map(([k, n]) => `<button class="${k === key ? "an" : ""}" data-tab="${k}">${IC[k]}<span>${n}</span></button>`).join("")}</nav>`.replace(sp ? /class="an" data-tab/ : /^$/, sp ? 'class="" data-tab' : "");
+  const rk = sp ? "sp:" + S.sp.art + (S.sp.id || "") : key;
+  if (render.letzterTab === rk) window.scrollTo(0, y); render.letzterTab = rk;
+  if (!sp) ({ jobs: chartsJobs, geld: chartsGeld, depot: chartsDepot }[key] || (() => {}))();
   binden();
 }
 function binden() {
-  $$("nav.tabs button").forEach((b) => b.onclick = () => { S.tab = b.dataset.tab; speicher.set("cockpit-tab", S.tab); S.mehr = false; window.scrollTo(0, 0); render(); });
+  $$("nav.tabs button").forEach((b) => b.onclick = () => { S.tab = b.dataset.tab; speicher.set("cockpit-tab", S.tab); S.mehr = false; if (S.sp) { S.sp = null; history.replaceState(null, "", location.pathname + location.search); } window.scrollTo(0, 0); render(); });
+  const bs = $("#b-speicher"); if (bs) bs.onclick = () => { location.hash = "#s/"; };
+  spBinden();
   $("#b-neu").onclick = () => { toast("Lade neu …", [], 1200); laden(); };
   $("#b-plus").onclick = neuBlatt;
   const f = $("#b-filter"); if (f) f.onclick = ignorierBlatt;
@@ -637,9 +642,186 @@ function loginSeite(fehler = "", modus = "") {
   }
 }
 
+// ---------------------------------------------------------------- Speicher (V9): alle Seiten und Datenbanken des digitalen Ichs
+// Ersetzt Notion als Ansicht. Links aus Routinen und Kern zeigen auf #s/<id> (Seite/Zeile) bzw. #s/q/<id> (Datenbank).
+const SPD = { quellen: null, freie: null, zeilen: {}, seiten: {} };
+const hexId = (s) => { const h = String(s || "").replace(/[^0-9a-f]/gi, "").toLowerCase(); return h.length === 32 ? `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}` : null; };
+function rtHtml(a) {
+  return (a || []).map((t) => {
+    let s = esc(t.plain_text ?? t.text?.content ?? "");
+    if (!s) return "";
+    const an = t.annotations || {};
+    if (an.code) s = `<code>${s}</code>`;
+    if (an.bold) s = `<b>${s}</b>`;
+    if (an.italic) s = `<i>${s}</i>`;
+    if (an.strikethrough) s = `<s>${s}</s>`;
+    const href = t.href || t.text?.link?.url;
+    if (href) s = `<a href="${esc(href)}" target="_blank" rel="noopener">${s}</a>`;
+    return s;
+  }).join("");
+}
+function propText(p) {
+  if (!p) return "";
+  switch (p.type) {
+    case "title": case "rich_text": return (p[p.type] || []).map((t) => t.plain_text).join("");
+    case "select": case "status": return p[p.type]?.name || "";
+    case "multi_select": return (p.multi_select || []).map((x) => x.name).join(", ");
+    case "date": return p.date?.start ? (p.date.start.length > 10 ? datumKurz(p.date.start) + " " + p.date.start.slice(11, 16) : datumKurz(p.date.start)) + (p.date.end ? " – " + datumKurz(p.date.end) : "") : "";
+    case "number": return p.number ?? "";
+    case "checkbox": return p.checkbox ? "ja" : "nein";
+    case "url": return p.url || "";
+    case "unique_id": return p.unique_id?.number != null ? `${p.unique_id.prefix ? p.unique_id.prefix + "-" : ""}${p.unique_id.number}` : "";
+    case "relation": return (p.relation || []).length ? `${p.relation.length} Verknüpfung(en)` : "";
+    case "created_time": case "last_edited_time": return p[p.type] ? datumKurz(p[p.type]) : "";
+    case "formula": { const f = p.formula || {}; return f[f.type] ?? ""; }
+    default: return "";
+  }
+}
+function propHtml(p) {
+  if (!p) return "";
+  if (p.type === "title" || p.type === "rich_text") return rtHtml(p[p.type]);
+  if (p.type === "url" && p.url) return `<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.url.replace(/^https?:\/\//, "").slice(0, 60))}</a>`;
+  if (p.type === "relation") return (p.relation || []).map((r) => `<a href="#s/${r.id.replace(/-/g, "")}">${esc(SPD.titel?.[r.id] || "Eintrag")}</a>`).join(" · ");
+  return esc(propText(p));
+}
+async function spLaden(art, id) {
+  if (TEST) {
+    const j = await (await fetch("test-speicher.json?" + Date.now())).json();
+    SPD.quellen = j.quellen; SPD.freie = j.freie;
+    if (art === "quelle") SPD.zeilen[id] = j.seiten.filter((s) => s.quelle === id);
+    if (art === "seite") SPD.seiten[id] = { seite: j.seiten.find((s) => s.id === id) || null, bloecke: j.bloecke.filter((b) => b.seite_id === id) };
+    render(); return;
+  }
+  try {
+    if (art === "start") {
+      const [q, f] = await Promise.all([
+        sb.from("speicher_quellen").select("id, titel, schema, datenbank_id").order("titel"),
+        sb.from("speicher_seiten").select("id, titel, parent, icon, geaendert").is("quelle", null).eq("archiviert", false).order("titel"),
+      ]);
+      SPD.quellen = q.data || []; SPD.freie = f.data || [];
+    } else if (art === "quelle") {
+      if (!SPD.quellen) await spLaden("start");
+      const { data } = await sb.from("speicher_seiten").select("id, titel, properties, geaendert, erstellt").eq("quelle", id).eq("archiviert", false)
+        .order("erstellt", { ascending: false }).limit(500);
+      SPD.zeilen[id] = data || [];
+    } else if (art === "seite") {
+      if (!SPD.quellen) await spLaden("start");
+      const [s, b] = await Promise.all([
+        sb.from("speicher_seiten").select("*").eq("id", id).maybeSingle(),
+        sb.from("speicher_bloecke").select("id, parent_id, position, typ, inhalt").eq("seite_id", id).eq("archiviert", false).order("position"),
+      ]);
+      const rel = Object.values(s.data?.properties || {}).filter((p) => p.type === "relation").flatMap((p) => p.relation.map((r) => r.id));
+      if (rel.length) {
+        const { data: t } = await sb.from("speicher_seiten").select("id, titel").in("id", rel.slice(0, 100));
+        SPD.titel = { ...(SPD.titel || {}), ...Object.fromEntries((t || []).map((x) => [x.id, x.titel])) };
+      }
+      SPD.seiten[id] = { seite: s.data, bloecke: b.data || [] };
+    }
+  } catch (e) { toast("Speicher nicht erreichbar: " + e.message); }
+  render();
+}
+function spOeffnen(art, id) {
+  S.sp = { art, id };
+  if (art === "start" && !SPD.quellen) spLaden("start");
+  if (art === "quelle" && !SPD.zeilen[id]) spLaden("quelle", id);
+  if (art === "seite") spLaden("seite", id);
+  window.scrollTo(0, 0); render();
+}
+function bloeckeHtml(bloecke, parent) {
+  const kinder = bloecke.filter((b) => b.parent_id === parent);
+  let h = "", liste = null;
+  const zu = () => { if (liste) { h += `</${liste}>`; liste = null; } };
+  for (const b of kinder) {
+    const x = b.inhalt || {}, t = rtHtml(x.rich_text), sub = bloecke.some((k) => k.parent_id === b.id) && b.typ !== "table" ? bloeckeHtml(bloecke, b.id) : "";
+    const art = b.typ === "bulleted_list_item" ? "ul" : b.typ === "numbered_list_item" ? "ol" : null;
+    if (art !== liste) { zu(); if (art) { h += `<${art}>`; liste = art; } }
+    switch (b.typ) {
+      case "heading_1": h += `<h2>${t}</h2>${sub}`; break;
+      case "heading_2": h += `<h3>${t}</h3>${sub}`; break;
+      case "heading_3": h += `<h4>${t}</h4>${sub}`; break;
+      case "bulleted_list_item": case "numbered_list_item": h += `<li>${t}${sub}</li>`; break;
+      case "to_do": h += `<div class="sp-todo">${x.checked ? "☑" : "☐"} ${t}</div>${sub}`; break;
+      case "quote": case "callout": h += `<blockquote>${x.icon?.emoji ? esc(x.icon.emoji) + " " : ""}${t}${sub}</blockquote>`; break;
+      case "code": h += `<pre>${esc((x.rich_text || []).map((r) => r.plain_text).join(""))}</pre>`; break;
+      case "divider": h += "<hr>"; break;
+      case "toggle": h += `<details><summary>${t}</summary>${sub}</details>`; break;
+      case "child_page": h += `<p><a href="#s/${String(x.seite || b.id).replace(/-/g, "")}">📄 ${esc(x.title || "Seite")}</a></p>`; break;
+      case "child_database": {
+        const q = (SPD.quellen || []).find((z) => (x.datenbank && z.datenbank_id === x.datenbank) || (x.title && z.titel === x.title));
+        h += `<p>${q ? `<a href="#s/q/${q.id.replace(/-/g, "")}">🗂️ ${esc(q.titel)}</a>` : `<span class="muted">🗂️ ${esc(x.title || "Datenbank-Ansicht (siehe Datenbanken)")}</span>`}</p>`; break;
+      }
+      case "table": {
+        const zeilen = bloecke.filter((k) => k.parent_id === b.id);
+        h += `<div class="sp-tab"><table>${zeilen.map((z, i) => `<tr>${(z.inhalt?.cells || []).map((c) => i === 0 && x.has_column_header ? `<th>${rtHtml(c)}</th>` : `<td>${rtHtml(c)}</td>`).join("")}</tr>`).join("")}</table></div>`;
+        break;
+      }
+      case "paragraph": h += t ? `<p>${t}</p>${sub}` : sub; break;
+      default: if (t) h += `<p>${t}</p>`; h += sub;
+    }
+  }
+  zu();
+  return h;
+}
+function seiteSpeicher() {
+  const sp = S.sp;
+  const zurueck = `<button class="knopf" id="sp-zurueck" style="margin-bottom:12px">‹ ${sp.art === "start" ? "Zurück zum Cockpit" : "Speicher"}</button>`;
+  if (sp.art === "start") {
+    if (!SPD.quellen) return zurueck + `<div class="leer">Lade …</div>`;
+    const freie = SPD.freie || [];
+    const kinderVon = (pid) => freie.filter((f) => f.parent?.page_id === pid);
+    const wurzeln = freie.filter((f) => !f.parent?.page_id || !freie.some((x) => x.id === f.parent.page_id));
+    const baum = (f, tiefe) => `<li style="padding-left:${tiefe * 14}px"><a href="#s/${f.id.replace(/-/g, "")}">${f.icon?.emoji ? esc(f.icon.emoji) + " " : "📄 "}${esc(f.titel || "(ohne Titel)")}</a><span class="meta"> · ${alter(f.geaendert)}</span></li>` + kinderVon(f.id).map((k) => baum(k, tiefe + 1)).join("");
+    return zurueck + `<div class="karte"><h2>Seiten</h2><ul class="liste sp-liste">${wurzeln.map((f) => baum(f, 0)).join("")}</ul></div>
+      <div class="karte"><h2>Datenbanken</h2><ul class="liste sp-liste">${SPD.quellen.map((q) => `<li><a href="#s/q/${q.id.replace(/-/g, "")}">🗂️ ${esc(q.titel)}</a></li>`).join("")}</ul></div>
+      <div class="hinweis">Einzige Wahrheit seit 13.11.2026 (Supabase, Zürich). Notion ist nur noch Archiv.</div>`;
+  }
+  if (sp.art === "quelle") {
+    const q = (SPD.quellen || []).find((x) => x.id === sp.id);
+    const zeilen = SPD.zeilen[sp.id];
+    if (!zeilen) return zurueck + `<div class="leer">Lade …</div>`;
+    const schema = q?.schema || {};
+    const statusP = Object.keys(schema).find((n) => n === "Status") || Object.keys(schema).find((n) => ["status", "select"].includes(schema[n].type));
+    const datumP = ["Frist", "Zeit", "Empfangen", "Datum", "Eingereicht am"].find((n) => schema[n]?.type === "date") || Object.keys(schema).find((n) => schema[n].type === "date");
+    const such = (S.spSuche || "").toLowerCase();
+    const statusWerte = [...new Set(zeilen.map((z) => propText(z.properties?.[statusP])).filter(Boolean))];
+    const sf = S.spStatus?.[sp.id] || "";
+    const liste = zeilen.filter((z) => (!such || (z.titel || "").toLowerCase().includes(such)) && (!sf || propText(z.properties?.[statusP]) === sf));
+    return zurueck + `<div class="karte"><h2>${esc(q?.titel || "Datenbank")} <span class="muted klein">${liste.length}/${zeilen.length}</span></h2>
+      <input id="sp-suche" class="sp-suche" placeholder="Suchen …" value="${esc(S.spSuche || "")}">
+      ${statusWerte.length > 1 ? `<div class="knoepfe sp-chips"><button class="chip ${!sf ? "an" : ""}" data-sf="">Alle</button>${statusWerte.map((w) => `<button class="chip ${sf === w ? "an" : ""}" data-sf="${esc(w)}">${esc(w)}</button>`).join("")}</div>` : ""}
+      <ul class="liste">${liste.slice(0, 300).map((z) => `<li><a class="reihe" href="#s/${z.id.replace(/-/g, "")}"><div class="l"><div class="titel">${esc(z.titel || "(ohne Titel)")}</div><div class="meta">${esc(propText(z.properties?.[statusP]))}${datumP && propText(z.properties?.[datumP]) ? " · " + esc(propText(z.properties[datumP])) : ""}</div></div></a></li>`).join("") || '<li class="leer">Keine Einträge.</li>'}</ul></div>`;
+  }
+  const d = SPD.seiten[sp.id];
+  if (!d) return zurueck + `<div class="leer">Lade …</div>`;
+  if (!d.seite) return zurueck + `<div class="leer">Nicht gefunden oder nicht sichtbar.</div>`;
+  const s = d.seite, q = (SPD.quellen || []).find((x) => x.id === s.quelle);
+  const props = q ? Object.entries(s.properties || {}).filter(([n, p]) => p.type !== "title" && propText(p) !== "" && propText(p) !== "nein") : [];
+  return zurueck + `<div class="karte sp-seite"><div class="meta">${q ? `<a href="#s/q/${q.id.replace(/-/g, "")}">${esc(q.titel)}</a>` : "Seite"} · geändert ${alter(s.geaendert)}</div>
+    <h2>${s.icon?.emoji ? esc(s.icon.emoji) + " " : ""}${esc(s.titel || "(ohne Titel)")}</h2>
+    ${props.length ? `<dl class="sp-props">${props.map(([n, p]) => `<dt>${esc(n)}</dt><dd>${propHtml(p)}</dd>`).join("")}</dl>` : ""}
+    <div class="sp-inhalt">${bloeckeHtml(d.bloecke, s.id) || (props.length ? "" : '<div class="leer">Kein Inhalt.</div>')}</div></div>`;
+}
+function spBinden() {
+  const z = $("#sp-zurueck");
+  if (z) z.onclick = () => { if (S.sp.art === "start") { S.sp = null; history.replaceState(null, "", location.pathname + location.search); render(); } else history.length > 1 && location.hash.startsWith("#s/") ? history.back() : (location.hash = "#s/"); };
+  const s = $("#sp-suche");
+  if (s) s.oninput = () => { S.spSuche = s.value; clearTimeout(spBinden.t); spBinden.t = setTimeout(() => { render(); const n = $("#sp-suche"); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }, 250); };
+  $$("[data-sf]").forEach((b) => b.onclick = () => { S.spStatus = { ...(S.spStatus || {}), [S.sp.id]: b.dataset.sf }; render(); });
+}
+function spRoute() {
+  const h = location.hash;
+  if (!h.startsWith("#s/")) { if (S.sp) { S.sp = null; render(); } return; }
+  const rest = h.slice(3);
+  if (!rest) return spOeffnen("start");
+  if (rest.startsWith("q/")) { const id = hexId(rest.slice(2)); if (id) { S.spSuche = ""; spOeffnen("quelle", id); } return; }
+  const id = hexId(rest); if (id) spOeffnen("seite", id);
+}
+window.addEventListener("hashchange", spRoute);
+
 async function start() {
   render();
   await laden();
+  spRoute();
   clearInterval(start.t); start.t = setInterval(() => { if (document.visibilityState === "visible") laden(); }, 5 * 60e3);
 }
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && S.geladen && Date.now() - new Date(S.geladen) > 60e3 && (TEST || sb)) laden(); });
