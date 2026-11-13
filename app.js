@@ -4,7 +4,7 @@
 const CFG = {
   url: "https://nnfrnhyitpbrbpjnmgfp.supabase.co",
   key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5uZnJuaHlpdHBicmJwam5tZ2ZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ1NDAxODMsImV4cCI6MjExMDExNjE4M30.z8W82Iud-IjFmLd-Eu-nQHA_sSNrvP7Ti0nDpeOWZe0",
-  version: "1.1.0",
+  version: "1.3.0",
 };
 const TEST = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) && new URLSearchParams(location.search).has("test");
 const $ = (s, el = document) => el.querySelector(s);
@@ -97,6 +97,7 @@ const ABFRAGEN = () => {
     buchungen: (q) => q.from("buchungen").select("datum,betrag,text,kategorie,konto,intern").gte("datum", vor45).order("datum", { ascending: false }).limit(120),
     depot: (q) => q.from("v_depot_aktuell").select("*"),
     depotverlauf: (q) => q.from("depot_verlauf").select("*").order("datum"),
+    instrumente: (q) => q.from("depot_instrumente").select("symbol,hebel"),
     trades: (q) => q.from("depot_trades").select("*").order("datum", { ascending: false }).limit(12),
     chancen: (q) => q.from("chancen").select("*").or(`gueltig_bis.is.null,gueltig_bis.gte.${h}`).order("relevanz", { ascending: false }).order("datum", { ascending: false }).limit(20),
     kurse: (q) => q.from("kurse").select("*").order("pruefung", { ascending: true, nullsFirst: false }),
@@ -111,7 +112,7 @@ const ABFRAGEN = () => {
 
 async function laden() {
   if (TEST) {
-    const r = await fetch("test-daten.json?" + Date.now());
+    const r = await fetch((new URLSearchParams(location.search).get("test") === "echt" ? "test-daten-echt.json" : "test-daten.json") + "?" + Date.now());
     S.d = await r.json(); S.geladen = new Date().toISOString(); render(); return;
   }
   const abfr = ABFRAGEN();
@@ -120,8 +121,10 @@ async function laden() {
     catch (e) { console.warn(k, e); return [k, S.d?.[k] ?? []]; }
   }));
   const neu = Object.fromEntries(ergebnisse);
-  if (!ergebnisse.some(([, v]) => v && v.length)) { S.offline = !navigator.onLine; }
-  S.d = neu; S.geladen = new Date().toISOString(); S.offline = false;
+  const etwas = ergebnisse.some(([, v]) => v && v.length);
+  S.offline = !etwas && !navigator.onLine;
+  S.d = neu; if (etwas) S.geladen = new Date().toISOString();
+  $("#b-sync")?.classList.remove("puls");
   speicher.set("cockpit-daten", S.d); speicher.set("cockpit-geladen", S.geladen);
   render();
 }
@@ -156,17 +159,91 @@ const tip = {
 };
 document.addEventListener("pointerdown", (e) => { if (!e.target.closest(".chart")) tip.weg(); });
 
+// ---------------------------------------------------------------- Texte säubern (Agenten-Prüfung 13.11.2026)
+const MINUS = "−";
+const vz = (x, d = 0) => (x == null || isNaN(x) ? "–" : (x >= 0 ? "+" : MINUS) + (d ? nf2 : nf0).format(Math.abs(x)));
+const terminTitel = (s) => String(s || "").replace(/^\s*\[(c|claude)\]\s*/i, "").replace(/\s*\(\d+\s*Min\.?\)\s*$/i, "").trim();
+const istBlock = (t) => /^\s*\[(c|claude)\]/i.test(t.titel || "");
+function stelleTeile(s) {
+  const m = String(s || "").match(/\s*\(((?:r-|req\.?|ref\.?|job ?id|stellen-?id)[^)]*)\)?\s*$/i);
+  return m ? [String(s).slice(0, m.index).trim(), m[1].replace(/\)$/, "")] : [String(s || ""), ""];
+}
+function haendler(t) {
+  let s = String(t || "")
+    .replace(/^\*?\s*(online\s+)?(einkauf|zahlung|lastschrift|lsv|gutschrift)\s+/i, "")
+    .replace(/^(twint|lsv)\s+/i, "").replace(/^\d+[.,]\d+\s+/, "")
+    .replace(/\*+\d+\*?/g, "").replace(/,\s*[^,]*\s(CH|[A-Z]{2}\sCH)$/i, "").replace(/-\d{3,5}\b/g, "").replace(/\s\d{3,5}$/g, "")
+    .replace(/\s{2,}/g, " ").trim();
+  if (s && s === s.toUpperCase() && /[A-ZÄÖÜ]{3}/.test(s)) s = s.toLowerCase().replace(/(^|[\s\-/&(])(\p{L})/gu, (m, a, b) => a + b.toUpperCase()).replace(/\b(Ag|Gmbh|Sa|Bv)\b/g, (x) => x.toUpperCase());
+  return s.slice(0, 48) || String(t || "");
+}
+const ohneCode = (s) => String(s || "").replace(/^(jour fixe\s+\d{1,2}\.\d{1,2}\.?\s*|plan\s+v\d+\s*)?[A-Z]\d+:\s*/i, "").replace(/\s*\(?\bK\d+[–-]K\d+\)?/g, "").trim();
+function appLink(url) {
+  const u = String(url || ""); const m = u.match(/(?:notion\.(?:so|com)\/)(?:.*?)([0-9a-f]{32})(?:[?#].*)?$/i);
+  return m ? `#s/${m[1].toLowerCase()}` : u;
+}
+const linkAttr = (u) => { const l = appLink(u); return l.startsWith("#") ? `href="${esc(l)}"` : `href="${esc(l)}" target="_blank" rel="noopener"`; };
+const tageBis = (d) => Math.round((d0(d) - heute()) / 864e5);
+const tageSeit = (d) => Math.round((heute() - d0(d)) / 864e5);
+function bisText(ts) {
+  const ms = new Date(ts) - new Date(), min = Math.round(ms / 6e4);
+  if (min < 0) return "läuft"; if (min < 60) return `in ${min} Min.`;
+  const h = Math.round(min / 60); if (h < 20) return `in ${h} Std.`;
+  const t = tageBis(ts); return t === 1 ? "morgen" : `in ${t} T`;
+}
+function mono(name) {
+  const s = String(name || "?").trim(); let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) % 360;
+  const k = s.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]).join("").toUpperCase() || "?";
+  return `<span class="mono" style="--h:${h}">${esc(k)}</span>`;
+}
+
+// Offene Abschnitte bleiben beim Neuzeichnen offen
+S.offen = new Set(speicher.get("cockpit-offen", []));
+const offen = (k) => (S.offen.has(k) ? " open" : "");
+document.addEventListener("toggle", (e) => {
+  const k = e.target?.dataset?.k; if (!k) return;
+  if (e.target.open) { S.offen.add(k); S.offen.delete(k + "-zu"); } else { S.offen.delete(k); S.offen.add(k + "-zu"); }
+  speicher.set("cockpit-offen", [...S.offen].slice(-80));
+}, true);
+
+// Datenstand je Quelle (nicht Laufzeit): Saldo, Buchungen, Saxo
+function datenStand() {
+  const d = S.d || {};
+  const saldo = (d.saldo || []).find((s) => s.konto === "privatkonto");
+  const buch = (d.buchungen || []).reduce((m, b) => (b.datum > m ? b.datum : m), "");
+  const depot = (d.depot || [])[0]?.stand || (d.depotverlauf || []).slice(-1)[0]?.datum || null;
+  return { saldo: saldo?.datum || null, buchungen: buch || null, depot };
+}
+const standChip = (datum, grenzeTage, name) => {
+  if (!datum) return `<span class="chip">${esc(name)}: keine Daten</span>`;
+  const t = tageSeit(datum);
+  return `<span class="chip ${t > grenzeTage ? "gelb" : ""}">${esc(name)} vom ${datumKurz(datum)}${t > grenzeTage ? ` · ${t} T alt` : ""}</span>`;
+};
+
 function einschaetzungKarte(dash) {
   const e = (S.d?.einschaetzung || []).find((x) => x.dashboard === dash);
-  if (!e) return `<div class="karte ein"><div class="zeile"><span class="ampel gelb">·</span><div><div class="schlag">Noch keine Einschätzung</div><div class="stand">Der Manager schreibt sie beim nächsten Lauf.</div></div></div></div>`;
-  const sym = { gruen: "✓", gelb: "!", rot: "!" }[e.ampel] || "";
+  if (!e) return `<div class="karte ein amp-gelb"><div class="schlag">Noch keine Einschätzung</div><div class="stand">Der Manager schreibt sie beim nächsten Lauf.</div></div>`;
   const punkte = (e.punkte || []).map((p) => `<li>${esc(p)}</li>`).join("");
-  return `<div class="karte ein"><div class="zeile"><span class="ampel ${e.ampel}" aria-label="Ampel ${e.ampel}">${sym}</span>
-    <div><div class="schlag">${esc(e.schlagzeile)}</div>${punkte ? `<ul>${punkte}</ul>` : ""}
-    ${e.text ? `<details class="details"><summary>Mehr dazu</summary><div class="mehr">${esc(e.text)}</div></details>` : ""}
-    <div class="stand">Einschätzung ${alter(e.stand)}${e.autor ? " · " + esc(e.autor) : ""}</div></div></div></div>`;
+  return `<details class="karte ein amp-${esc(e.ampel)}" data-k="ein-${dash}"${offen("ein-" + dash)}><summary><div class="schlag">${esc(e.schlagzeile)}</div>
+    <div class="stand">${{ rot: "Achtung", gelb: "Im Blick behalten", gruen: "Auf Kurs" }[e.ampel] || ""} · ${alter(e.stand)}${punkte ? ` · ${(e.punkte || []).length} Punkte` : ""}</div></summary>
+    ${punkte ? `<ul>${punkte}</ul>` : ""}${e.text ? `<div class="mehr">${esc(e.text)}</div>` : ""}</details>`;
 }
 const kachel = (name, wert, sub = "", cls = "") => `<div class="kachel"><div class="name">${esc(name)}</div><div class="wert ${cls}">${wert}</div>${sub ? `<div class="sub">${sub}</div>` : ""}</div>`;
+function hero({ label, wert, einheit = "", sub = "", cls = "", chart = "" }) {
+  return `<section class="hero"><div class="lab">${esc(label)}</div><div class="zahl ${cls}" data-privat>${einheit ? `<small>${esc(einheit)}</small>` : ""}${wert}</div>${sub ? `<div class="sub">${sub}</div>` : ""}${chart}</section>`;
+}
+const zeileKpi = (items) => `<div class="kpis">${items.map((i) => `<div class="kpi"><div class="w ${i.cls || ""}">${i.wert}</div><div class="n">${esc(i.name)}</div>${i.sub ? `<div class="s">${i.sub}</div>` : ""}</div>`).join("")}</div>`;
+const sek = (titel, zahl = "", rechts = "") => `<div class="sek"><span>${esc(titel)}</span>${zahl !== "" ? `<span class="zahl">${zahl}</span>` : ""}${rechts}</div>`;
+function meter(items, { fmt = (v) => nf0.format(v), max = null, farbe = "var(--s1)" } = {}) {
+  const m = max ?? Math.max(1e-9, ...items.map((i) => Math.abs(i.wert)));
+  return `<div class="meter">${items.map((i) => `<div class="m ${i.blass ? "blass" : ""}"><div class="kopfz"><span class="lab">${i.name}</span><span class="val">${i.text ?? fmt(i.wert)}</span></div>
+    <div class="spur"><i style="width:${Math.max(1.5, Math.min(100, (Math.abs(i.wert) / m) * 100))}%;background:${i.farbe || farbe}"></i>${i.umriss ? `<b style="width:${Math.min(100, (i.umriss / m) * 100)}%"></b>` : ""}</div></div>`).join("")}</div>`;
+}
+function segment(teile, gesamt = null) {
+  const g = gesamt ?? teile.reduce((s, t) => s + t.wert, 0);
+  return `<div class="stapel">${teile.filter((t) => t.wert > 0).map((t) => `<i style="width:${(t.wert / Math.max(1e-9, g)) * 100}%;background:${t.farbe}" title="${esc(t.name)}"></i>`).join("")}</div>
+    <div class="legende">${teile.map((t) => `<span style="--c:${t.farbe}">${esc(t.name)} ${t.text ?? nf0.format(t.wert)}</span>`).join("")}</div>`;
+}
 
 // ---------------------------------------------------------------- Diagramme (SVG, Tooltip per Tippen)
 function stufen(lo, hi, n = 4) {
@@ -176,14 +253,15 @@ function stufen(lo, hi, n = 4) {
   for (let v = a; v <= b + st / 2; v += st) out.push(Math.round(v * 1e6) / 1e6);
   return out;
 }
-function nett(max) { if (max <= 0) return 1; const p = Math.pow(10, Math.floor(Math.log10(max))); const n = max / p; return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * p; }
-function balken(id, { labels, serien, hoehe = 190, fmt = (v) => chf(v) }) {
+function balken(id, { labels, serien, hoehe = 190, fmt = (v) => chf(v), umriss = [], linieSerie = null, aria = "Balkendiagramm" }) {
   const el = document.getElementById(id); if (!el) return;
   const W = Math.max(300, el.clientWidth || 340), H = hoehe, L = 44, R = 6, T = 8, B = 24;
-  const ticks = stufen(0, Math.max(1, ...serien.flatMap((s) => s.werte.map((v) => v || 0))), 3), max = ticks[ticks.length - 1];
+  const alle = serien.flatMap((s) => s.werte.map((v) => v || 0)).concat(linieSerie ? linieSerie.werte : []);
+  const ticks = stufen(0, Math.max(1, ...alle), 3), max = ticks[ticks.length - 1];
   const pw = W - L - R, ph = H - T - B, gw = pw / labels.length;
   const bw = Math.max(4, Math.min(18, (gw - 8) / serien.length - 2));
   const y = (v) => T + ph - (v / max) * ph;
+  const jede = Math.max(1, Math.ceil(labels.length / Math.floor(pw / 38)));
   let s = "";
   ticks.forEach((v) => { const yy = y(v); s += `<line class="grid" x1="${L}" x2="${W - R}" y1="${yy}" y2="${yy}"/><text class="ax" x="${L - 6}" y="${yy + 4}" text-anchor="end">${fmt(v)}</text>`; });
   labels.forEach((lab, i) => {
@@ -191,37 +269,61 @@ function balken(id, { labels, serien, hoehe = 190, fmt = (v) => chf(v) }) {
     serien.forEach((se, j) => {
       const v = se.werte[i] || 0, x = gx + j * (bw + 2), yy = y(v), h = T + ph - yy, r = Math.min(4, h, bw / 2);
       const d = h <= 0 ? "" : `M${x},${T + ph} V${yy + r} Q${x},${yy} ${x + r},${yy} H${x + bw - r} Q${x + bw},${yy} ${x + bw},${yy + r} V${T + ph} Z`;
-      s += `<path d="${d}" fill="${se.farbe}" data-tip="${esc(`${lab} · ${se.name}: ${fmt(v)}`)}"/>`;
+      const u = umriss[i];
+      s += `<path d="${d}" fill="${u ? "none" : se.farbe}" stroke="${u ? se.farbe : "none"}" stroke-width="1.5" stroke-dasharray="${u ? "3 2" : ""}" data-tip="${esc(`${lab} · ${se.name}: ${fmt(v)}${u ? " (laufend)" : ""}`)}"/>`;
       s += `<rect x="${x - 1}" y="${T}" width="${bw + 2}" height="${ph}" fill="transparent" data-tip="${esc(`${lab} · ${se.name}: ${fmt(v)}`)}"/>`;
     });
-    if (labels.length <= 14 || i % 2 === 0) s += `<text class="ax" x="${L + gw * i + gw / 2}" y="${H - 6}" text-anchor="middle">${esc(lab)}</text>`;
+    if (i % jede === 0 || i === labels.length - 1) s += `<text class="ax" x="${L + gw * i + gw / 2}" y="${H - 6}" text-anchor="middle">${esc(lab)}</text>`;
   });
+  if (linieSerie) {
+    const p = linieSerie.werte.map((v, i) => `${i ? "L" : "M"}${(L + gw * i + gw / 2).toFixed(1)},${y(v || 0).toFixed(1)}`).join(" ");
+    s += `<path d="${p}" fill="none" stroke="${linieSerie.farbe}" stroke-width="2" stroke-linejoin="round"/>`;
+  }
   s += `<line class="null" x1="${L}" x2="${W - R}" y1="${T + ph}" y2="${T + ph}"/>`;
-  const leg = serien.length > 1 ? `<div class="legende">${serien.map((x) => `<span style="--c:${x.farbe}">${esc(x.name)}</span>`).join("")}</div>` : "";
-  el.innerHTML = `${leg}<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Balkendiagramm">${s}</svg>`;
+  const leg = serien.length > 1 || linieSerie ? `<div class="legende">${serien.map((x) => `<span style="--c:${x.farbe}">${esc(x.name)}</span>`).join("")}${linieSerie ? `<span class="strichleg" style="--c:${linieSerie.farbe}">${esc(linieSerie.name)}</span>` : ""}</div>` : "";
+  el.innerHTML = `${leg}<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(aria)}">${s}</svg>`;
   tipAn(el);
 }
-function linie(id, { punkte, hoehe = 180, fmt = (v) => chf(v), farbe = "var(--s1)", nullLinie = false, heuteMarke = false }) {
-  const el = document.getElementById(id); if (!el || !punkte.length) { if (el) el.innerHTML = `<div class="leer">Noch keine Daten.</div>`; return; }
-  const W = Math.max(300, el.clientWidth || 340), H = hoehe, L = 48, R = 8, T = 10, B = 24;
+function linie(id, { punkte, hoehe = 180, fmt = (v) => chf(v), farbe = "var(--s1)", nullLinie = false, heuteMarke = false, treppe = false, tief = false, aria = "Verlauf" }) {
+  const el = document.getElementById(id); if (!el) return;
+  if (punkte.length < 2) { el.innerHTML = `<div class="leer">Der Verlauf erscheint ab zwei Ständen.</div>`; return; }
+  const W = Math.max(300, el.clientWidth || 340), H = hoehe, L = 48, R = 8, T = 18, B = 24;
   const xs = punkte.map((p) => +new Date(p.x)), vs = punkte.map((p) => p.y);
   let lo = Math.min(...vs, nullLinie ? 0 : Infinity), hi = Math.max(...vs, nullLinie ? 0 : -Infinity);
   if (lo === hi) { lo -= 1; hi += 1; }
   const tk = stufen(lo, hi, 3); lo = tk[0]; hi = tk[tk.length - 1];
   const x0 = Math.min(...xs), x1 = Math.max(...xs) || x0 + 1;
   const X = (t) => L + ((t - x0) / Math.max(1, x1 - x0)) * (W - L - R), Y = (v) => T + (1 - (v - lo) / (hi - lo)) * (H - T - B);
+  const basis = nullLinie && lo < 0 ? Y(0) : T + (H - T - B);
   let s = "";
   tk.forEach((v) => { s += `<line class="grid" x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}"/><text class="ax" x="${L - 6}" y="${Y(v) + 4}" text-anchor="end">${fmt(v)}</text>`; });
-  if (nullLinie && lo < 0 && hi > 0) s += `<line x1="${L}" x2="${W - R}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--crit)" stroke-width="1" stroke-dasharray="4 4"/>`;
-  const pfad = punkte.map((p, i) => `${i ? "L" : "M"}${X(+new Date(p.x)).toFixed(1)},${Y(p.y).toFixed(1)}`).join(" ");
-  s += `<path d="${pfad} L${X(x1)},${T + (H - T - B)} L${X(x0)},${T + (H - T - B)} Z" fill="${farbe}" opacity=".1"/>`;
+  let pfad = "";
+  punkte.forEach((p, i) => {
+    const x = X(+new Date(p.x)).toFixed(1), yy = Y(p.y).toFixed(1);
+    pfad += i === 0 ? `M${x},${yy}` : treppe ? ` H${x} V${yy}` : ` L${x},${yy}`;
+  });
+  const uid = id.replace(/\W/g, "");
+  const flaeche = `${pfad} L${X(x1)},${basis} L${X(x0)},${basis} Z`;
+  if (nullLinie && lo < 0) {
+    s += `<clipPath id="ob-${uid}"><rect x="${L}" y="${T}" width="${W - L - R}" height="${Math.max(0, Y(0) - T)}"/></clipPath><clipPath id="un-${uid}"><rect x="${L}" y="${Y(0)}" width="${W - L - R}" height="${Math.max(0, H - B - Y(0))}"/></clipPath>`;
+    s += `<path d="${flaeche}" fill="${farbe}" opacity=".12" clip-path="url(#ob-${uid})"/><path d="${flaeche}" fill="var(--crit)" opacity=".2" clip-path="url(#un-${uid})"/>`;
+    s += `<line x1="${L}" x2="${W - R}" y1="${Y(0)}" y2="${Y(0)}" stroke="var(--crit)" stroke-width="1.2"/>`;
+  } else s += `<path d="${flaeche}" fill="${farbe}" opacity=".1"/>`;
   s += `<path d="${pfad}" fill="none" stroke="${farbe}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>`;
-  const marken = [0, Math.floor(punkte.length / 2), punkte.length - 1].filter((v, i, a) => a.indexOf(v) === i);
-  marken.forEach((i) => { const d = new Date(punkte[i].x); s += `<text class="ax" x="${X(+d)}" y="${H - 6}" text-anchor="${i === 0 ? "start" : i === punkte.length - 1 ? "end" : "middle"}">${d.getDate()}.${d.getMonth() + 1}.</text>`; });
-  if (heuteMarke) { const t = +heute(); if (t >= x0 && t <= x1) s += `<line x1="${X(t)}" x2="${X(t)}" y1="${T}" y2="${H - B}" stroke="var(--text-3)" stroke-dasharray="2 3"/>`; }
+  const jede = Math.max(1, Math.ceil(punkte.length / Math.max(2, Math.floor((W - L - R) / 70))));
+  const mk = punkte.map((_, i) => i).filter((i) => i === 0 || i === punkte.length - 1 || (i % jede === 0 && i < punkte.length - jede / 2));
+  const monatsBeschr = (x1 - x0) > 120 * 864e5;
+  mk.slice(0, 6).forEach((i, k, a) => { const d = new Date(punkte[i].x); s += `<text class="ax" x="${X(+d)}" y="${H - 6}" text-anchor="${k === 0 ? "start" : k === a.length - 1 ? "end" : "middle"}">${monatsBeschr ? MONATE[d.getMonth()] + " " + String(d.getFullYear()).slice(2) : `${d.getDate()}.${d.getMonth() + 1}.`}</text>`; });
+  if (heuteMarke) { const t = +heute(); if (t >= x0 && t <= x1) s += `<line x1="${X(t)}" x2="${X(t)}" y1="${T}" y2="${H - B}" stroke="var(--text-3)" stroke-dasharray="2 3"/><text class="ax" x="${X(t) + 3}" y="${T - 5}">heute</text>`; }
+  if (tief) {
+    let bi = 0; vs.forEach((v, i) => { if (v < vs[bi]) bi = i; });
+    const tx = X(xs[bi]), ty = Y(vs[bi]), d = new Date(xs[bi]);
+    s += `<circle cx="${tx}" cy="${ty}" r="4" fill="${vs[bi] < 0 ? "var(--crit)" : farbe}" stroke="var(--surface)" stroke-width="2"/>`;
+    s += `<text class="ax stark" x="${Math.min(W - R - 4, Math.max(L + 4, tx))}" y="${Math.min(H - B - 6, ty + 16)}" text-anchor="${tx > W * 0.7 ? "end" : tx < W * 0.3 ? "start" : "middle"}">Tief ${fmt(vs[bi])} · ${d.getDate()}.${d.getMonth() + 1}.</text>`;
+  }
   s += `<line class="kreuz" x1="0" x2="0" y1="${T}" y2="${H - B}" stroke="var(--text-2)" stroke-width="1" opacity="0"/><circle class="kp" r="5" fill="${farbe}" stroke="var(--surface)" stroke-width="2" opacity="0"/>`;
   s += `<rect x="${L}" y="${T}" width="${W - L - R}" height="${H - T - B}" fill="transparent" class="flaeche"/>`;
-  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Verlauf">${s}</svg>`;
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(aria)}">${s}</svg>`;
   const svg = $("svg", el), fl = $(".flaeche", el), kr = $(".kreuz", el), kp = $(".kp", el);
   const zeige = (e) => {
     const r = svg.getBoundingClientRect(), sx = ((e.clientX - r.left) / r.width) * W;
@@ -231,7 +333,7 @@ function linie(id, { punkte, hoehe = 180, fmt = (v) => chf(v), farbe = "var(--s1
     kr.setAttribute("x1", px); kr.setAttribute("x2", px); kr.setAttribute("opacity", ".5");
     kp.setAttribute("cx", px); kp.setAttribute("cy", py); kp.setAttribute("opacity", "1");
     const d = new Date(xs[best]);
-    tip.zeig(r.left + (px / W) * r.width, r.top + (py / H) * r.height, `${datumKurz(d)} ${d.getFullYear()} · ${fmt(vs[best])}`);
+    tip.zeig(r.left + (px / W) * r.width, r.top + (py / H) * r.height, `${datumKurz(d)} ${d.getFullYear()} · ${fmt(vs[best])}${punkte[best].info ? " · " + esc(punkte[best].info) : ""}`);
   };
   fl.addEventListener("pointermove", zeige); fl.addEventListener("pointerdown", zeige);
   fl.addEventListener("pointerleave", () => { kr.setAttribute("opacity", "0"); kp.setAttribute("opacity", "0"); tip.weg(); });
@@ -242,239 +344,501 @@ function tipAn(el) {
 }
 function hbalken(items, fmt = (v) => chf(v), farbe = "var(--s1)") {
   const max = Math.max(1, ...items.map((i) => i.wert));
-  return `<div class="hbar">${items.map((i) => `<div class="lab">${esc(i.name)}${i.zusatz ? ` <span class="muted klein">${i.zusatz}</span>` : ""}</div><div class="val">${fmt(i.wert)}</div>
+  return `<div class="hbar">${items.map((i) => `<div class="lab">${i.punkt ? `<span class="kp" style="--c:${i.punkt}"></span>` : ""}${esc(i.name)}${i.zusatz ? ` <span class="muted klein">${i.zusatz}</span>` : ""}</div><div class="val">${fmt(i.wert)}</div>
     <div class="bar"><i style="width:${Math.max(1.5, (i.wert / max) * 100)}%;background:${i.farbe || farbe}"></i></div>`).join("")}</div>`;
+}
+// Zeitstrahl-Band (Fristen, Meilensteine): Bahnen mit Rauten, Heute-Linie
+function bahnen(id, { von, bis, bahnen: bs }) {
+  const el = document.getElementById(id); if (!el) return;
+  const W = Math.max(300, el.clientWidth || 340), L = 78, R = 10, T = 18, BH = 30, H = T + bs.length * BH + 14;
+  const t0 = +von, t1 = +bis, X = (t) => L + ((t - t0) / Math.max(1, t1 - t0)) * (W - L - R);
+  let s = "";
+  for (let d = new Date(von); d <= bis; d.setDate(d.getDate() + 1)) {
+    if (d.getDate() === 1) s += `<line class="grid" x1="${X(+d)}" x2="${X(+d)}" y1="${T - 4}" y2="${H - 10}"/><text class="ax" x="${X(+d) + 3}" y="${T - 6}">${MONATE[d.getMonth()]}</text>`;
+  }
+  bs.forEach((b, i) => {
+    const y = T + i * BH + BH / 2;
+    s += `<text class="ax" x="0" y="${y + 4}">${esc(b.name)}</text><line class="grid" x1="${L}" x2="${W - R}" y1="${y}" y2="${y}"/>`;
+    b.punkte.filter((p) => +new Date(p.t) >= t0 && +new Date(p.t) <= t1).forEach((p) => {
+      const x = X(+new Date(p.t));
+      s += `<path d="M${x},${y - 7} L${x + 7},${y} L${x},${y + 7} L${x - 7},${y} Z" fill="${b.farbe}" stroke="var(--surface)" stroke-width="1.5" data-tip="${esc(`${datumKurz(p.t)} · ${p.titel}`)}"/>`;
+    });
+  });
+  const h = +heute(); if (h >= t0 && h <= t1) s += `<line x1="${X(h)}" x2="${X(h)}" y1="${T - 4}" y2="${H - 10}" stroke="var(--crit)" stroke-width="1.2"/>`;
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Fristen auf der Zeitachse">${s}</svg>`;
+  tipAn(el);
 }
 
 // ---------------------------------------------------------------- Seiten
+const istManagerBitte = (a) => /^\s*(für den manager|freischalten)\b[:\s]/i.test(a.titel || "");
+function rang(a) {
+  if (!a.frist) return a.wichtig >= 3 ? 4 : 5;
+  const f = new Date(a.frist), jetzt = new Date();
+  if (f < jetzt) return 1;
+  if (isoTag(f) === isoTag(jetzt)) return 2;
+  if (f - jetzt <= 48 * 36e5) return 3;
+  return a.wichtig >= 3 ? 4 : 5;
+}
+const sortiereAufgaben = (liste) => [...liste].sort((a, b) => rang(a) - rang(b) || (a.frist ? +new Date(a.frist) : 9e15) - (b.frist ? +new Date(b.frist) : 9e15));
+function heuteZahlen() {
+  const auf = S.d?.aufgaben || [], ende = new Date(heute()); ende.setDate(ende.getDate() + 1);
+  const faellig = auf.filter((a) => a.frist && new Date(a.frist) < ende && !istManagerBitte(a));
+  return { faellig: faellig.length, minuten: faellig.reduce((s, a) => s + (+a.minuten || 0), 0) };
+}
+
 function seiteHeute() {
   const d = S.d || {};
-  const auf = [...(d.aufgaben || [])].sort((a, b) => b.dringlich - a.dringlich || (a.frist ? +new Date(a.frist) : 9e15) - (b.frist ? +new Date(b.frist) : 9e15));
-  const sicht = S.mehr ? auf : auf.slice(0, 7);
+  const alle = sortiereAufgaben(d.aufgaben || []);
+  const bitten = alle.filter(istManagerBitte), auf = alle.filter((a) => !istManagerBitte(a));
   const ents = (d.entscheide || []).filter((f) => !f.antwort);
-  let h = einschaetzungKarte("heute");
+  const jetzt = new Date();
+  const naechster = (d.termine || []).filter((t) => !t.ganztags && new Date(t.ende || t.start) > jetzt).sort((a, b) => new Date(a.start) - new Date(b.start))[0];
+  const erledigt = (d.manager || []).filter((m) => m.status === "erledigt" && !/^pre-mortem/i.test(m.titel));
+  // Heute in 30 Sekunden
+  let h = `<section class="karte brief"><div class="brief-kopf">Heute in 30 Sekunden</div><ul class="brief-liste">`;
+  if (naechster) h += `<li><span class="ic">${IC.uhr}</span><div><b>${esc(terminTitel(naechster.titel))}</b><div class="meta">${datumKurz(naechster.start)} ${hhmm(naechster.start)} · ${bisText(naechster.start)}${naechster.ort ? " · " + esc(naechster.ort) : ""}</div></div></li>`;
+  auf.slice(0, 3).forEach((a, i) => { h += `<li class="tippbar" data-oeffne="${a.id}"><span class="nr">${i + 1}</span><div><b>${esc(a.titel)}</b><div class="meta">${a.frist ? fristText(a.frist, a.frist_mit_zeit) : "ohne Frist"}${a.minuten ? ` · ${a.minuten} Min.` : ""}</div></div></li>`; });
+  if (ents.length) { const fr = ents.filter((e) => e.frist).sort((a, b) => new Date(a.frist) - new Date(b.frist))[0];
+    h += `<li><span class="ic">${IC.filter}</span><div><b>${ents.length} Entscheid${ents.length > 1 ? "e" : ""} für dich</b><div class="meta">${fr ? "erster bis " + fristText(fr.frist, true) : "ohne Frist"} · unten wischen</div></div></li>`; }
+  if (bitten.length) h += `<li><span class="ic warn">!</span><div><b>Manager braucht dich: ${bitten.length}×</b><div class="meta">${bitten.slice(0, 2).map((a) => esc(a.titel.replace(/^\s*(für den manager|freischalten)\s*:?\s*/i, ""))).join(" · ")}</div></div></li>`;
+  if (erledigt.length) h += `<li><span class="ic gut">${IC.ok}</span><div><b>Für dich erledigt: ${erledigt.length} in 7 Tagen</b><div class="meta">${esc(erledigt[0].titel.slice(0, 70))}</div></div></li>`;
+  h += `</ul></section>`;
+  h += einschaetzungKarte("heute");
+  if (ents.length) {
+    h += sek("Entscheide", ents.length);
+    h += `<div class="quer">${ents.map((f, i) => `<article class="karte entscheid" data-id="${f.id}">
+      <div class="meta"><span class="muted">${i + 1} von ${ents.length}</span>${f.frist ? `<span class="chip ${new Date(f.frist) < new Date() ? "rot" : "blau"}">${fristText(f.frist, true)}</span>` : ""}${f.typ === "Bewerbung" ? '<span class="chip">Bewerbung</span>' : ""}</div>
+      <div class="frage">${esc(ohneCode(f.frage))}</div>
+      ${f.kontext ? `<details class="details" data-k="ent-${f.id}"${offen("ent-" + f.id)}><summary>Hintergrund</summary>${esc(f.kontext)}${f.link ? `<br><a ${linkAttr(f.link)}>Öffnen</a>` : ""}</details>` : f.link ? `<div class="details"><a ${linkAttr(f.link)}>Öffnen</a></div>` : ""}
+      <input type="text" class="kommentar" placeholder="Kommentar (freiwillig)" maxlength="500">
+      <div class="antworten seg">${(f.erlaubt?.length ? f.erlaubt : ["Ja", "Nein", "Später"]).map((a) => `<button class="knopf ${/^(ja|einreichen)$/i.test(a) ? "primaer" : ""}" data-antwort="${esc(a)}">${esc(a)}</button>`).join("")}</div></article>`).join("")}</div>`;
+  }
+  if (bitten.length) h += sek("Manager braucht dich", bitten.length) + `<div class="karte liste-karte"><ul class="liste">${bitten.map(aufgabeZeile).join("")}</ul></div>`;
+  const sicht = S.mehr ? auf : auf.slice(0, 6);
+  h += sek("Deine Aufgaben", auf.length, `<button class="alle" id="b-filter2">Ausgeblendet</button>`);
+  h += `<div class="karte liste-karte">${auf.length ? `<ul class="liste">${sicht.map(aufgabeZeile).join("")}</ul>` : `<div class="leer gross">Alles erledigt ✓</div>`}
+    ${auf.length > 6 ? `<button class="knopf mehrzeigen" id="mehr">${S.mehr ? "Weniger zeigen" : `Alle ${auf.length} zeigen`}</button>` : ""}<div class="wischhinweis">Nach rechts wischen = erledigt · nach links = später</div></div>`;
+  h += wocheKarte();
+  if (erledigt.length || (d.manager || []).length) {
+    const lauf = (d.manager || []).filter((m) => m.status !== "erledigt" && !/^pre-mortem/i.test(m.titel));
+    h += sek("Für dich erledigt", erledigt.length ? `${erledigt.length} in 7 T` : "");
+    h += `<div class="karte liste-karte"><ul class="liste">${erledigt.slice(0, 6).map((m) => `<li class="zeile-einfach"><span class="haken an">${IC.ok}</span><div><div class="titel">${esc(m.titel)}</div><div class="meta">${m.beleg ? beleg(m.beleg) : "ohne Beleg"} · ${alter(m.geaendert)}</div></div></li>`).join("") || '<li class="leer">Noch nichts diese Woche.</li>'}</ul>
+      ${lauf.length ? `<details class="details" data-k="mgr-lauf"${offen("mgr-lauf")}><summary>${lauf.length} in Arbeit beim Manager</summary><ul class="liste">${lauf.map((m) => `<li><div class="titel" style="font-weight:500">${esc(m.titel)}</div><div class="meta">${m.frist ? fristText(m.frist) : ""}</div></li>`).join("")}</ul></details>` : ""}</div>`;
+  }
+  const ein = d.eingaben || [];
+  if (ein.length) h += sek("Deine Nachrichten an den Manager") + `<div class="karte"><ul class="liste">${ein.slice(0, 4).map((e) => `<li><div>${esc(e.text)}</div><div class="meta">${alter(e.erstellt)} · ${e.verarbeitet_am ? "✓ " + esc(e.ergebnis || "erledigt") : "wartet auf den nächsten Lauf"}</div></li>`).join("")}</ul></div>`;
   if (!window.matchMedia("(display-mode: standalone)").matches && !navigator.standalone && /iPhone|iPad/.test(navigator.userAgent))
     h += `<div class="banner">📲 <div>Als App installieren: unten auf <b>Teilen</b> tippen, dann <b>Zum Home-Bildschirm</b>.</div></div>`;
-  if (ents.length) {
-    h += `<div class="karte"><h2>Entscheide für dich · ${ents.length}</h2><ul class="liste">${ents.map((f) => `
-      <li class="entscheid" data-id="${f.id}"><div class="frage">${esc(f.frage)}</div>
-      <div class="meta">${f.frist ? `<span class="chip ${new Date(f.frist) < new Date() ? "rot" : "blau"}">${fristText(f.frist, true)}</span>` : ""}${f.typ === "Bewerbung" ? '<span class="chip">Bewerbung</span>' : ""}</div>
-      ${f.kontext ? `<details class="details"><summary>Hintergrund</summary>${esc(f.kontext)}${f.link ? `<br><a href="${esc(f.link)}" target="_blank" rel="noopener">Öffnen</a>` : ""}</details>` : ""}
-      <div class="antworten">${(f.erlaubt?.length ? f.erlaubt : ["Ja", "Nein", "Später"]).map((a) => `<button class="knopf ${a === "Ja" || a === "Einreichen" ? "primaer" : ""}" data-antwort="${esc(a)}">${esc(a)}</button>`).join("")}</div></li>`).join("")}</ul></div>`;
-  }
-  h += `<div class="karte"><h2>Deine Aufgaben · ${auf.length}</h2>`;
-  if (!auf.length) h += `<div class="leer">Nichts offen. Neues kommt über das Plus unten rechts.</div>`;
-  h += `<ul class="liste">${sicht.map(aufgabeZeile).join("")}</ul>`;
-  if (auf.length > 7) h += `<button class="knopf mehrzeigen" id="mehr">${S.mehr ? "Weniger zeigen" : `Alle ${auf.length} zeigen`}</button>`;
-  h += `</div>`;
-  const kommend = (d.termine || []).filter((t) => new Date(t.ende || t.start) >= new Date());
-  h += terminKarte(kommend.filter((t) => new Date(t.start) < plusTage(S.woche ? 8 : 3)), S.woche ? "Diese Woche" : "Nächste 3 Tage",
-    `<button class="knopf mehrzeigen" id="woche">${S.woche ? "Nur 3 Tage" : "Ganze Woche zeigen"}</button>`);
-  const mg = (d.manager || []).filter((m) => m.status !== "erledigt");
-  const mf = (d.manager || []).filter((m) => m.status === "erledigt");
-  h += `<div class="karte"><h2>Was der Manager macht</h2><details class="details"><summary>${mg.length} in Arbeit · ${mf.length} diese Woche erledigt</summary>
-    <ul class="liste" style="margin-top:8px">${mg.slice(0, 12).map((m) => `<li><div class="titel" style="font-weight:500">${esc(m.titel)}</div><div class="meta">${m.frist ? fristText(m.frist) : ""}</div></li>`).join("")}
-    ${mf.slice(0, 8).map((m) => `<li><div class="titel muted" style="font-weight:500">✓ ${esc(m.titel)}</div></li>`).join("")}</ul></details></div>`;
-  const ein = d.eingaben || [];
-  if (ein.length) h += `<div class="karte"><h2>Deine Nachrichten an den Manager</h2><ul class="liste">${ein.slice(0, 4).map((e) => `<li><div>${esc(e.text)}</div><div class="meta">${alter(e.erstellt)} · ${e.verarbeitet_am ? "✓ " + esc(e.ergebnis || "erledigt") : "wartet auf den nächsten Lauf"}</div></li>`).join("")}</ul></div>`;
   return h;
+}
+function beleg(b) {
+  const s = String(b || ""); const m = s.match(/https?:\/\/\S+|#s\/[0-9a-f]{32}/i);
+  return m ? `<a ${linkAttr(m[0])}>Beleg</a>` : `<span title="${esc(s)}">Beleg: ${esc(s.slice(0, 40))}${s.length > 40 ? "…" : ""}</span>`;
 }
 function aufgabeZeile(a) {
   const ueber = a.frist && new Date(a.frist) < new Date();
-  const cl = (a.checkliste || []);
-  const notiz = (a.notiz || "").trim();
-  return `<li class="aufgabe" data-id="${a.id}">
-    <div class="titel">${esc(a.titel)}</div>
-    <div class="meta">${a.frist ? `<span class="chip ${ueber ? "rot" : a.dringlich >= 3 ? "gelb" : ""}">${fristText(a.frist, a.frist_mit_zeit)}</span>` : ""}${a.bereich ? `<span class="chip">${esc(a.bereich)}</span>` : ""}${a.minuten ? `<span class="chip">${a.minuten} Min.</span>` : ""}</div>
-    ${notiz || cl.length ? `<details class="details"><summary>${cl.length ? `Checkliste ${cl.filter((c) => c.fertig).length}/${cl.length}` : "Nächster Schritt"}</summary>
-      ${cl.map((c) => `<div class="check ${c.fertig ? "fertig" : ""}"><span class="b"></span><span>${esc(c.text)}</span></div>`).join("")}
-      ${notiz ? `<div style="margin-top:6px">${esc(notiz)}</div>` : ""}</details>` : ""}
-    <div class="knoepfe"><button class="knopf gut" data-akt="erledigt">${IC.ok}Erledigt</button><button class="knopf weg" data-akt="verworfen">${IC.weg}Nicht relevant</button><button class="knopf weg" data-akt="spaeter">${IC.uhr}Später</button></div></li>`;
+  const cl = a.checkliste || [];
+  return `<li class="aufgabe" data-id="${a.id}"><div class="wisch-l">${IC.uhr}<span>Später</span></div><div class="wisch-r">${IC.ok}<span>Erledigt</span></div>
+    <div class="aufgabe-in"><button class="haken" data-akt="erledigt" aria-label="Erledigt"></button>
+    <div class="inhalt"><div class="titel">${esc(a.titel)}</div>
+    <div class="meta">${a.frist ? `<span class="${ueber ? "schlecht" : rang(a) <= 3 ? "warnt" : ""}">${fristText(a.frist, a.frist_mit_zeit)}</span>` : ""}${a.bereich ? `<span>${esc(a.bereich)}</span>` : ""}${a.minuten ? `<span>${a.minuten} Min.</span>` : ""}${cl.length ? `<span>☐ ${cl.filter((c) => c.fertig).length}/${cl.length}</span>` : ""}</div></div>
+    <span class="pfeil">›</span></div></li>`;
+}
+function aufgabeBlatt(id) {
+  const a = (S.d.aufgaben || []).find((x) => x.id === id); if (!a) return;
+  const cl = a.checkliste || [];
+  blatt(`<h3>${esc(a.titel)}</h3><div class="meta" style="margin:-6px 0 12px">${a.frist ? `<span class="chip ${new Date(a.frist) < new Date() ? "rot" : "blau"}">${fristText(a.frist, a.frist_mit_zeit)}</span>` : ""}${a.bereich ? `<span class="chip">${esc(a.bereich)}</span>` : ""}${a.minuten ? `<span class="chip">${a.minuten} Min.</span>` : ""}</div>
+    ${cl.length ? `<div class="klein muted">Checkliste</div>${cl.map((c) => `<div class="check ${c.fertig ? "fertig" : ""}"><span class="b"></span><span>${esc(c.text)}</span></div>`).join("")}` : ""}
+    ${a.notiz ? `<div class="klein muted" style="margin-top:10px">Nächster Schritt</div><div class="details" style="margin-top:2px">${esc(a.notiz)}</div>` : ""}
+    ${a.quelle ? `<div class="klein muted" style="margin-top:10px">Quelle</div><div class="details" style="margin-top:2px">${/^https?:/i.test(a.quelle) ? `<a ${linkAttr(a.quelle)}>Öffnen</a>` : esc(a.quelle)}</div>` : ""}
+    ${a.notion_id ? `<div class="details"><a href="#s/${a.notion_id.replace(/-/g, "")}" id="b-im-speicher">Im Speicher öffnen</a></div>` : ""}
+    <div class="knoepfe"><button class="knopf gut" data-akt="erledigt">${IC.ok}Erledigt</button><button class="knopf" data-akt="spaeter">${IC.uhr}Später</button><button class="knopf weg" data-akt="verworfen">${IC.weg}Nicht relevant</button></div>`, (b) => {
+    $$("[data-akt]", b).forEach((k) => k.onclick = () => { blattZu(); aufgabeAktion(id, k.dataset.akt); });
+    const sp = $("#b-im-speicher", b); if (sp) sp.onclick = () => blattZu();
+  });
+}
+// Wischen: rechts = erledigt, links = später; Tippen = Details
+function wischen(li) {
+  const inn = $(".aufgabe-in", li); let x0 = null, y0 = 0, dx = 0, aktiv = false;
+  li.addEventListener("pointerdown", (e) => { if (e.target.closest(".haken")) return; x0 = e.clientX; y0 = e.clientY; dx = 0; aktiv = false; });
+  li.addEventListener("pointermove", (e) => {
+    if (x0 == null) return; dx = e.clientX - x0;
+    if (!aktiv && Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(e.clientY - y0)) { aktiv = true; li.setPointerCapture?.(e.pointerId); li.classList.add("zieht"); }
+    if (aktiv) { inn.style.transform = `translateX(${dx}px)`; li.classList.toggle("rechts", dx > 0); li.classList.toggle("bereit", Math.abs(dx) > 90); }
+  });
+  const ende = () => {
+    if (x0 == null) return; const war = aktiv, d = dx; x0 = null; li.classList.remove("zieht", "bereit");
+    if (!war) { if (Math.abs(d) < 8) aufgabeBlatt(li.dataset.id); return; }
+    if (d > 90) { inn.style.transform = "translateX(110%)"; li.classList.add("weg"); setTimeout(() => aufgabeAktion(li.dataset.id, "erledigt"), 180); }
+    else { inn.style.transform = ""; if (d < -90) aufgabeAktion(li.dataset.id, "spaeter"); }
+  };
+  li.addEventListener("pointerup", ende); li.addEventListener("pointercancel", () => { x0 = null; inn.style.transform = ""; li.classList.remove("zieht", "bereit"); });
+}
+function wocheKarte() {
+  const d = S.d || {}, tage = [];
+  for (let i = 0; i < 7; i++) {
+    const tg = plusTage(i), k = isoTag(tg);
+    const ter = (d.termine || []).filter((t) => isoTag(t.start) === k).sort((a, b) => new Date(a.start) - new Date(b.start));
+    const fr = [
+      ...(d.aufgaben || []).filter((a) => a.frist && isoTag(a.frist) === k).map((a) => ({ t: a.frist, titel: a.titel, art: "Frist" })),
+      ...(d.abgaben || []).filter((a) => a.frist && isoTag(a.frist) === k).map((a) => ({ t: a.frist, titel: a.titel, art: "Abgabe" })),
+      ...(d.bewerbungen || []).filter((b) => b.frist && isoTag(b.frist) === k && !["abgesagt", "geschlossen"].includes(b.status)).map((b) => ({ t: b.frist, titel: `${b.firma || ""}: ${stelleTeile(b.stelle)[0]}`, art: "Bewerbung" })),
+    ];
+    const fest = ter.filter((t) => !t.ganztags && !istBlock(t));
+    const konflikte = [];
+    const timed = ter.filter((t) => !t.ganztags);
+    timed.forEach((a, i2) => timed.slice(i2 + 1).forEach((b) => { if (new Date(b.start) < new Date(a.ende || +new Date(a.start) + 36e5)) konflikte.push(`${hhmm(a.start)} ${terminTitel(a.titel).slice(0, 26)} ↔ ${terminTitel(b.titel).slice(0, 26)}`); }));
+    const wt = tg.getDay();
+    if (wt >= 1 && wt <= 3) ter.filter((t) => istBlock(t) && !t.ganztags).forEach((t) => { const hh = new Date(t.start).getHours(); if (hh >= 8 && hh < 17) konflikte.push(`${hhmm(t.start)} Block in der E+H-Zeit: ${terminTitel(t.titel).slice(0, 30)}`); });
+    if (fest.length > 2) konflikte.push(`${fest.length} feste Termine`);
+    tage.push({ tg, k, ter, fr, konflikte });
+  }
+  const name = (tg, i) => (i === 0 ? "Heute" : i === 1 ? "Morgen" : `${TAGE[tg.getDay()]} ${tg.getDate()}.${tg.getMonth() + 1}.`);
+  const total = tage.reduce((s, t) => s + t.konflikte.length, 0);
+  return sek("Diese Woche", total ? `<span class="chip gelb">${total} Konflikt${total > 1 ? "e" : ""}</span>` : "") + `<div class="karte woche">${tage.map((t, i) => {
+    const kk = "tag-" + t.k, auf = S.offen.has(kk) || (i < 2 && !S.offen.has(kk + "-zu"));
+    return `<details class="tagz" data-k="${kk}"${auf ? " open" : ""}><summary><span class="tn">${name(t.tg, i)}</span><span class="tz">${t.ter.length ? `${t.ter.length} Termin${t.ter.length > 1 ? "e" : ""}` : ""}${t.fr.length ? ` · ${t.fr.length} Frist${t.fr.length > 1 ? "en" : ""}` : ""}${!t.ter.length && !t.fr.length ? "frei" : ""}</span>${t.konflikte.length ? `<span class="chip gelb">⚠ ${t.konflikte.length}</span>` : ""}</summary>
+      ${t.konflikte.map((x) => `<div class="konflikt">⚠ ${esc(x)}</div>`).join("")}
+      ${t.ter.map((x) => `<div class="termin"><div class="zeit">${x.ganztags ? "ganztags" : hhmm(x.start) + (x.ende && !x.ganztags ? `<br><span class="muted">${hhmm(x.ende)}</span>` : "")}</div><div class="strich" style="background:${terminFarbe(x)}"></div><div class="was"><div class="titel" style="font-weight:500">${esc(terminTitel(x.titel))}</div><div class="meta">${istBlock(x) ? "Block vom Manager" : ""}${x.ort ? (istBlock(x) ? " · " : "") + esc(x.ort) : ""}</div></div></div>`).join("")}
+      ${t.fr.map((x) => `<div class="termin"><div class="zeit">${hhmm(x.t)}</div><div class="strich" style="background:var(--crit)"></div><div class="was"><div class="titel" style="font-weight:500">${esc(x.titel)}</div><div class="meta">${x.art}</div></div></div>`).join("")}
+      ${!t.ter.length && !t.fr.length ? '<div class="leer">Nichts eingetragen.</div>' : ""}</details>`;
+  }).join("")}</div>`;
 }
 function terminKarte(termine, titel, fuss = "") {
-  if (!termine.length) return `<div class="karte"><h2>${titel}</h2><div class="leer">Keine Termine erfasst.</div>${fuss}</div>`;
+  if (!termine.length) return sek(titel) + `<div class="karte"><div class="leer">Keine Termine erfasst.</div>${fuss}</div>`;
   const tage = {};
   termine.forEach((t) => { const k = isoTag(t.start); (tage[k] ||= []).push(t); });
-  return `<div class="karte"><h2>${titel}</h2>${Object.entries(tage).map(([k, ts]) => {
+  return sek(titel, termine.length) + `<div class="karte">${Object.entries(tage).map(([k, ts]) => {
     const tg = new Date(k), diff = Math.round((d0(tg) - heute()) / 864e5);
     const name = diff === 0 ? "Heute" : diff === 1 ? "Morgen" : `${TAGE[tg.getDay()]} ${tg.getDate()}. ${MONATE[tg.getMonth()]}`;
-    return `<div class="tag">${name}</div>${ts.map((t) => `<div class="termin"><div class="zeit">${t.ganztags ? "ganztags" : hhmm(t.start)}</div><div class="strich" style="background:${terminFarbe(t)}"></div><div class="was"><div class="titel" style="font-weight:500">${esc(t.titel)}</div>${t.ort ? `<div class="meta">${esc(t.ort)}</div>` : ""}</div></div>`).join("")}`;
+    return `<div class="tag">${name}</div>${ts.map((t) => `<div class="termin"><div class="zeit">${t.ganztags ? "ganztags" : hhmm(t.start)}</div><div class="strich" style="background:${terminFarbe(t)}"></div><div class="was"><div class="titel" style="font-weight:500">${esc(terminTitel(t.titel))}</div>${t.ort ? `<div class="meta">${esc(t.ort)}</div>` : ""}</div></div>`).join("")}`;
   }).join("")}${fuss}</div>`;
 }
 function terminArt(t) {
+  const k = String(t.kategorie || "").toLowerCase();
+  if (["job", "karriere", "bewerbung"].includes(k)) return "job";
+  if (["uni", "studium"].includes(k)) return "uni";
   const s = `${t.titel} ${t.ort || ""}`;
-  if (/interview|bewerb|assessment|recruit|julius|ubs|jb\b|lgt|pictet|helvetia/i.test(s)) return "job";
+  const firmen = (S.d?.bewerbungen || []).filter((b) => !["abgesagt", "geschlossen", "entdeckt"].includes(b.status)).map((b) => (b.firma || "").split(/\s+/)[0]).filter((f) => f.length >= 3);
+  if (/interview|bewerb|assessment|recruit/i.test(s) || firmen.some((f) => s.toLowerCase().includes(f.toLowerCase()))) return "job";
   if (/hsg|case|vorlesung|prüfung|pruefung|ma-|masterarbeit|canvas|kurs|seminar|lernen|amazonia/i.test(s)) return "uni";
-  if (/^\[c\]/i.test(t.titel)) return "block";
+  if (istBlock(t)) return "block";
   return "privat";
 }
 const terminFarbe = (t) => ({ job: "var(--s1)", uni: "var(--s3)", block: "var(--s7)", privat: "var(--s4)" }[terminArt(t)]);
 
-function seiteJobs() {
+// ---------------------------------------------------------------- Jobs
+const EING = ["eingereicht", "assessment", "interview", "angebot", "abgesagt"];
+const statusName = (s) => ({ entdeckt: "entdeckt", dossier_bereit: "Dossier bereit", freigegeben: "freigegeben", eingereicht: "eingereicht", assessment: "Test", interview: "Interview", angebot: "Angebot", abgesagt: "Absage", geschlossen: "geschlossen" }[s] || s);
+function jobZahlen() {
   const b = S.d?.bewerbungen || [];
-  const eingereicht = b.filter((x) => x.eingereicht_am || ["eingereicht", "interview", "angebot", "abgesagt"].includes(x.status));
-  const antworten = eingereicht.filter((x) => ["interview", "angebot", "abgesagt"].includes(x.status));
-  const interviews = b.filter((x) => ["interview", "angebot"].includes(x.status));
-  const w7 = eingereicht.filter((x) => x.eingereicht_am && new Date(x.eingereicht_am) >= plusTage(-7)).length;
-  const offen = b.filter((x) => x.status === "eingereicht");
-  let h = einschaetzungKarte("jobs");
-  h += `<div class="kacheln">${kachel("Eingereicht", eingereicht.length, `${w7} in 7 Tagen`)}${kachel("Interviews", interviews.length, pct(interviews.length / Math.max(1, eingereicht.length)) + " Quote")}
-    ${kachel("Antworten", antworten.length, pct(antworten.length / Math.max(1, eingereicht.length)) + " Rücklauf")}${kachel("Warten", offen.length, "noch ohne Antwort")}</div>`;
-  h += `<div class="karte"><h2>Bewerbungen pro Woche</h2><div class="chart" id="c-wochen"></div></div>`;
-  const iv = b.filter((x) => x.status === "interview");
+  const eing = b.filter((x) => x.eingereicht_am || EING.includes(x.status));
+  const antw = (x) => x.antwort_am || ["assessment", "interview", "angebot", "abgesagt"].includes(x.status);
+  const test = (x) => x.test_am || x.interview_am || ["assessment", "interview", "angebot"].includes(x.status);
+  const gespr = (x) => x.interview_am || ["interview", "angebot"].includes(x.status);
+  const reif = eing.filter((x) => x.eingereicht_am && tageSeit(x.eingereicht_am) >= 21);
+  return { b, eing, antw, test, gespr, reif };
+}
+function seiteJobs() {
+  const { b, eing, antw, test, gespr, reif } = jobZahlen();
+  const aktivGespr = b.filter((x) => ["interview", "angebot"].includes(x.status));
+  const tests = b.filter((x) => x.status === "assessment");
+  const w7 = eing.filter((x) => x.eingereicht_am && tageSeit(x.eingereicht_am) < 7).length;
+  const wochen = jobWochen(), schnitt = wochen.slice(-5, -1).reduce((s, w) => s + w.n, 0) / 4;
+  let h = hero({ label: "Echte Gespräche", wert: nf0.format(b.filter(gespr).length), sub: `${aktivGespr.length} laufend · ${tests.length} Test${tests.length === 1 ? "" : "s"} offen · ${eing.length} eingereicht` });
+  h += zeileKpi([
+    { name: "Diese Woche", wert: nf0.format(w7), sub: `Ø ${nf0.format(schnitt * 10) / 10} pro Woche` },
+    { name: "Antwortquote", wert: pct(reif.filter(antw).length / Math.max(1, reif.length)), sub: `ab 21 T · n=${reif.length}` },
+    { name: "Gesprächsquote", wert: pct(reif.filter(gespr).length / Math.max(1, reif.length)), sub: `ab 21 T · n=${reif.length}` },
+  ]);
+  h += einschaetzungKarte("jobs");
+  const stufen = [["Eingereicht", eing.length], ["Antwort", eing.filter(antw).length], ["Test oder Gespräch", eing.filter(test).length], ["Gespräch", eing.filter(gespr).length], ["Angebot", eing.filter((x) => x.angebot_am || x.status === "angebot").length]];
+  const farbT = ["#86b6ef", "#5e9be6", "#3a7fd9", "#2563b8", "#104281"];
+  h += sek("Trichter") + `<div class="karte">${meter(stufen.map(([n, v], i) => ({ name: esc(n), wert: v, text: `${nf0.format(v)}${i ? ` <span class="muted">· ${pct(v / Math.max(1, stufen[i - 1][1]))}</span>` : ""}`, farbe: farbT[i] })), { max: Math.max(1, eing.length) })}
+    <div class="klein muted" style="margin-top:6px">Online-Tests zählen als «Test», nicht als Gespräch. Quote jeweils zur Vorstufe.</div></div>`;
+  h += sek("Takt pro Woche") + `<div class="karte"><div class="chart" id="c-wochen"></div></div>`;
+  const wartend = b.filter((x) => x.status === "eingereicht" && x.eingereicht_am);
+  const alt = [[0, 7, "0–7 T", "var(--s3)"], [8, 21, "8–21 T", "var(--s1)"], [22, 42, "22–42 T", "var(--s4)"], [43, 1e4, "über 42 T", "var(--s8)"]].map(([a, z, n, f]) => ({ name: n, wert: wartend.filter((x) => { const t = tageSeit(x.eingereicht_am); return t >= a && t <= z; }).length, farbe: f }));
+  h += sek("Warten auf Antwort", wartend.length) + `<div class="karte">${segment(alt.map((x) => ({ ...x, text: String(x.wert) })))}
+    ${wartend.filter((x) => tageSeit(x.eingereicht_am) > 21).length ? `<div class="klein muted">Über 21 Tage ohne Antwort: ${wartend.filter((x) => tageSeit(x.eingereicht_am) > 21).map((x) => esc(x.firma || "")).join(", ")}</div>` : ""}</div>`;
   const bereit = b.filter((x) => ["dossier_bereit", "freigegeben"].includes(x.status));
-  const lauf = [...iv, ...bereit, ...offen.sort((a, z) => (z.eingereicht_am || "").localeCompare(a.eingereicht_am || ""))];
-  h += `<div class="karte"><h2>Läuft gerade · ${lauf.length}</h2><ul class="liste">${lauf.slice(0, S.alleBew ? 99 : 8).map((x) => {
-    const chipc = x.status === "interview" ? "gruen" : x.status === "eingereicht" ? "blau" : "gelb";
-    const tage = x.eingereicht_am ? Math.round((heute() - d0(x.eingereicht_am)) / 864e5) : null;
-    return `<li><div class="reihe"><div class="l"><div class="titel">${esc(x.stelle)}</div><div class="meta">${esc(x.firma || "")}${x.ort ? " · " + esc(x.ort) : ""}</div></div>
-      <div class="r"><span class="chip ${chipc}">${esc(statusName(x.status))}</span>${tage != null ? `<div class="meta">${tage} T</div>` : ""}</div></div></li>`;
+  const lauf = [...aktivGespr, ...tests, ...bereit, ...wartend.sort((a, z) => (z.eingereicht_am || "").localeCompare(a.eingereicht_am || ""))];
+  const jobTermine = (S.d?.termine || []).filter((t) => new Date(t.ende || t.start) >= new Date());
+  h += sek("Läuft gerade", lauf.length) + `<div class="karte liste-karte"><ul class="liste">${lauf.slice(0, S.alleBew ? 99 : 8).map((x) => {
+    const [titel, ref] = stelleTeile(x.stelle);
+    const fw = (x.firma || "").split(/\s+/)[0].toLowerCase();
+    const termin = fw.length >= 2 ? jobTermine.find((t) => t.titel.toLowerCase().includes(fw) && /interview|gespräch|assessment|call/i.test(t.titel)) : null;
+    let rechts;
+    if (x.status === "interview") rechts = `<span class="chip gruen">Gespräch</span><div class="meta">${termin ? datumKurz(termin.start) : "Termin offen"}</div>`;
+    else if (x.status === "angebot") rechts = `<span class="chip gruen">Angebot</span>`;
+    else if (x.status === "assessment") rechts = `<span class="chip lila">Test offen</span>${x.frist ? `<div class="meta">${fristText(x.frist)}</div>` : ""}`;
+    else if (x.status === "eingereicht") { const t = tageSeit(x.eingereicht_am); rechts = `<div class="meta ${t > 21 ? "blass" : ""}">seit ${t} T</div>`; }
+    else rechts = `<span class="chip gelb">${esc(statusName(x.status))}</span>`;
+    return `<li><div class="reihe mit-mono">${mono(x.firma)}<div class="l"><div class="titel">${esc(titel)}</div><div class="meta">${esc(x.firma || "")}${x.ort ? " · " + esc(x.ort) : ""}${ref ? ` · <span class="muted">${esc(ref)}</span>` : ""}</div></div><div class="r">${rechts}</div></div></li>`;
   }).join("") || '<li class="leer">Nichts in Arbeit.</li>'}</ul>${lauf.length > 8 ? `<button class="knopf mehrzeigen" id="alle-bew">${S.alleBew ? "Weniger" : `Alle ${lauf.length} zeigen`}</button>` : ""}</div>`;
-  const erf = S.d?.erfolg || [];
-  const tabelle = (dim) => {
-    const rows = erf.filter((e) => e.dimension === dim).sort((a, z) => z.n - a.n);
-    if (!rows.length) return "";
-    return `<table class="tabelle"><tr><th>${dim}</th><th class="z">Gesendet</th><th class="z">Antwort</th><th class="z">Interview</th></tr>${rows.map((r) => `<tr><td>${esc(r.wert)}</td><td class="z">${r.n}</td><td class="z">${pct(r.antworten / Math.max(1, r.n))}</td><td class="z">${r.interviews ? `<b>${pct(r.interviews / Math.max(1, r.n))}</b>` : "0 %"}</td></tr>`).join("")}</table>`;
-  };
-  h += `<div class="karte"><h2>Wo es klappt</h2>${tabelle("Rollentyp")}<div style="height:14px"></div>${tabelle("Vorlage")}<div style="height:14px"></div>${tabelle("ATS")}
-    <div class="klein muted" style="margin-top:8px">Vorlage nach Einreichedatum: v1 bis 8.11., v2 LGT-Muster ab 9.11., v3 Playbook ab 12.11.</div></div>`;
-  h += terminKarte((S.d?.termine || []).filter((t) => terminArt(t) === "job" && new Date(t.ende || t.start) >= new Date()), "Job-Termine");
-  const zu = b.filter((x) => ["abgesagt", "geschlossen"].includes(x.status)).slice(0, 10);
-  h += `<div class="karte"><h2>Zuletzt abgeschlossen</h2><details class="details"><summary>${b.filter((x) => x.status === "abgesagt").length} Absagen, ${b.filter((x) => x.status === "geschlossen").length} geschlossen</summary>
-    <ul class="liste" style="margin-top:8px">${zu.map((x) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(x.stelle)}</div><div class="meta">${esc(x.firma || "")}</div></div><div class="r"><span class="chip">${esc(statusName(x.status))}</span></div></div></li>`).join("")}</ul></details></div>`;
+  const erf = S.d?.erfolg || [], dim = S.jobDim || "Rollentyp";
+  const dims = ["Rollentyp", "Vorlage", "Kanal"].filter((x) => erf.some((e) => e.dimension === x));
+  const rows = erf.filter((e) => e.dimension === dim).map((r) => ({ ...r, nn: r.n_reif ?? r.n, ii: r.interviews_reif ?? r.interviews })).sort((a, z) => z.nn - a.nn);
+  h += sek("Wo es klappt") + `<div class="karte"><div class="seg-schalter">${dims.map((x) => `<button class="${x === dim ? "an" : ""}" data-dim="${x}">${x}</button>`).join("")}</div>
+    ${meter(rows.map((r) => ({ name: esc(r.wert), wert: r.ii / Math.max(1, r.nn), text: `${r.ii}/${r.nn} · ${pct(r.ii / Math.max(1, r.nn))}`, blass: r.nn < 5, farbe: "var(--s3)" })), { max: Math.max(0.25, ...rows.map((r) => r.ii / Math.max(1, r.nn))) })}
+    <div class="klein muted" style="margin-top:6px">Balken = Gesprächsquote${rows.some((r) => r.n_reif != null) ? " der Bewerbungen ab 21 Tagen" : ""}. Unter 5 Fällen blass: noch keine Aussage.${dim === "Vorlage" ? " Vorlage nach Einreichedatum: v1 bis 8.11., v2 ab 9.11., v3 ab 12.11." : ""}</div></div>`;
+  h += terminKarte(jobTermine.filter((t) => terminArt(t) === "job"), "Job-Termine");
+  const zu = b.filter((x) => ["abgesagt", "geschlossen"].includes(x.status)).slice(0, 12);
+  h += sek("Abgeschlossen") + `<div class="karte"><details class="details" data-k="job-zu"${offen("job-zu")}><summary>${b.filter((x) => x.status === "abgesagt").length} Absagen, ${b.filter((x) => x.status === "geschlossen").length} geschlossen</summary>
+    <ul class="liste" style="margin-top:8px">${zu.map((x) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(stelleTeile(x.stelle)[0])}</div><div class="meta">${esc(x.firma || "")}</div></div><div class="r"><span class="chip">${esc(statusName(x.status))}</span></div></div></li>`).join("")}</ul></details></div>`;
   return h;
 }
-const statusName = (s) => ({ entdeckt: "entdeckt", dossier_bereit: "Dossier bereit", freigegeben: "freigegeben", eingereicht: "eingereicht", interview: "Interview", angebot: "Angebot", abgesagt: "Absage", geschlossen: "geschlossen" }[s] || s);
+function jobWochen() {
+  const b = S.d?.bewerbungen || [], start = new Date(heute()); start.setDate(start.getDate() - ((start.getDay() + 6) % 7) - 15 * 7);
+  const out = [];
+  for (let i = 0; i < 16; i++) {
+    const a = new Date(start); a.setDate(a.getDate() + i * 7); const z = new Date(a); z.setDate(z.getDate() + 7);
+    const n = b.filter((x) => x.eingereicht_am && new Date(x.eingereicht_am) >= a && new Date(x.eingereicht_am) < z).length;
+    const kw = (() => { const t = new Date(Date.UTC(a.getFullYear(), a.getMonth(), a.getDate())); const tag = t.getUTCDay() || 7; t.setUTCDate(t.getUTCDate() + 4 - tag); const j = new Date(Date.UTC(t.getUTCFullYear(), 0, 1)); return Math.ceil(((t - j) / 864e5 + 1) / 7); })();
+    out.push({ a, n, kw, laufend: i === 15 });
+  }
+  return out;
+}
 function chartsJobs() {
-  const w = (S.d?.wochen || []).slice(-10);
-  balken("c-wochen", { labels: w.map((x) => { const d = new Date(x.woche); return `${d.getDate()}.${d.getMonth() + 1}.`; }),
-    serien: [{ name: "Eingereicht", farbe: "var(--s1)", werte: w.map((x) => x.eingereicht) }, { name: "Später Interview", farbe: "var(--s3)", werte: w.map((x) => x.interviews) }],
-    fmt: (v) => nf0.format(v), hoehe: 170 });
+  const w = jobWochen();
+  const avg = w.map((_, i) => { const s = w.slice(Math.max(0, i - 3), i + 1); return s.reduce((x, y) => x + y.n, 0) / s.length; });
+  balken("c-wochen", { labels: w.map((x) => "KW " + x.kw), serien: [{ name: "Eingereicht", farbe: "var(--s1)", werte: w.map((x) => x.n) }],
+    umriss: w.map((x) => x.laufend), linieSerie: { name: "Ø 4 Wochen", farbe: "var(--s2)", werte: avg }, fmt: (v) => nf0.format(v), hoehe: 170,
+    aria: `Bewerbungen pro Woche, letzte 16 Wochen; diese Woche ${w[15].n}` });
 }
 
+// ---------------------------------------------------------------- Geld
 function monateVoll(n) {
-  // die letzten n abgeschlossenen Monate (ISO yyyy-mm-01)
   const out = [], d = new Date(); d.setDate(1);
   for (let i = n; i >= 1; i--) { const x = new Date(d.getFullYear(), d.getMonth() - i, 1); out.push(isoTag(x)); }
   return out;
 }
+const KAT_FARBE = ["var(--s1)", "var(--s2)", "var(--s3)", "var(--s4)", "var(--s5)", "var(--s7)", "var(--s8)", "var(--s6)"];
+function minusPhasen(prog) {
+  const out = []; let a = null;
+  prog.forEach((p, i) => { if (+p.saldo < 0 && !a) a = p; if ((+p.saldo >= 0 || i === prog.length - 1) && a) { out.push({ von: a.datum, bis: +p.saldo >= 0 ? prog[i - 1].datum : null }); a = null; } });
+  return out;
+}
 function seiteGeld() {
-  const d = S.d || {};
-  const fm = d.finanzmonat || [], am = d.ausgabenmonat || [];
-  const voll = monateVoll(6);
-  const fm6 = fm.filter((m) => voll.includes(m.monat));
-  const schnittAus = fm6.reduce((s, m) => s + (+m.ausgaben || 0), 0) / Math.max(1, fm6.length);
-  const schnittEin = fm6.reduce((s, m) => s + (+m.einnahmen || 0), 0) / Math.max(1, fm6.length);
-  const quote = schnittEin ? (schnittEin - schnittAus) / schnittEin : null;
+  const d = S.d || {}, ds = datenStand();
+  const fm = (d.finanzmonat || []).filter((m) => !ds.buchungen || m.monat <= ds.buchungen);
+  const vollMonate = fm.filter((m) => { const e = new Date(m.monat); e.setMonth(e.getMonth() + 1); e.setDate(0); return ds.buchungen && isoTag(e) <= ds.buchungen; }).slice(-12);
+  const ein = vollMonate.reduce((s, m) => s + (+m.einnahmen || 0), 0), aus = vollMonate.reduce((s, m) => s + (+m.ausgaben || 0), 0);
+  const quote = ein ? (ein - aus) / ein : null;
   const saldo = (d.saldo || []).find((s) => s.konto === "privatkonto");
   const prog = d.prognose || [];
   const tief = prog.length ? prog.reduce((a, b) => (+b.saldo < +a.saldo ? b : a)) : null;
-  const negativ = prog.find((p) => +p.saldo < 0);
-  let h = einschaetzungKarte("finanzen");
-  h += `<div class="kacheln">${kachel("Konto", chf(saldo ? +saldo.saldo : null), saldo ? "Stand " + datumKurz(saldo.datum) : "")}
-    ${kachel("Ausgaben Ø", chf(schnittAus), "pro Monat, letzte 6")}${kachel("Sparquote", pct(quote), "letzte 6 Monate", quote != null && quote < 0.1 ? "schlecht" : "")}
-    ${kachel("Tiefstand", tief ? chf(+tief.saldo) : "–", tief ? (negativ ? `unter 0 ab ${datumKurz(negativ.datum)}` : "am " + datumKurz(tief.datum)) : "", tief && +tief.saldo < 0 ? "schlecht" : "")}</div>`;
-  h += `<div class="karte"><h2>Einnahmen und Ausgaben pro Monat</h2><div class="chart" id="c-monate"></div></div>`;
-  // Kategorien: Ø letzte 3 vs. Ø 3 davor
-  const v3 = monateVoll(3), v6 = monateVoll(6).slice(0, 3);
-  const kat = {};
+  const phasen = minusPhasen(prog), unter = prog.filter((p) => +p.saldo < 0).length;
+  const fmt = (x) => (x == null ? "–" : chf(x).replace("-", MINUS));
+  let h = hero({ label: "Privatkonto", einheit: "CHF", wert: fmt(saldo ? +saldo.saldo : null), cls: saldo && +saldo.saldo < 0 ? "schlecht" : "",
+    sub: `${standChip(ds.saldo, 7, "Saldo")}${standChip(ds.buchungen, 35, "Buchungen")}` });
+  h += `<div class="karte"><div class="karte-kopf"><span>Kontostand · Prognose ${prog.length} Tage</span></div><div class="chart" id="c-prognose"></div>
+    ${phasen.length ? `<div class="phasen">${phasen.map((p) => `<span class="chip rot">${datumKurz(p.von)}${p.bis ? "–" + datumKurz(p.bis) : " und weiter"}</span>`).join("")}</div>` : ""}
+    <div class="klein muted">Rote Fläche = Konto im Minus. Annahmen und Fixposten aus der Liquiditätsplanung.</div></div>`;
+  h += zeileKpi([
+    { name: "Erste Unterdeckung", wert: phasen[0] ? datumKurz(phasen[0].von) : "keine", cls: phasen[0] ? "schlecht" : "gut", sub: phasen[0] ? `${phasen.length} Phase${phasen.length > 1 ? "n" : ""}` : "im Horizont" },
+    { name: "Tage unter 0", wert: `${unter}<small>/${prog.length}</small>`, cls: unter ? "schlecht" : "gut", sub: tief ? `Tief ${fmt(+tief.saldo)}` : "" },
+    { name: "Sparquote", wert: pct(quote).replace("-", MINUS), cls: quote != null && quote < 0.1 ? "schlecht" : "", sub: `${vollMonate.length} volle Monate` },
+  ]);
+  h += einschaetzungKarte("finanzen");
+  h += sek("Einnahmen und Ausgaben", "", `<span class="zahl">pro Monat</span>`) + `<div class="karte"><div class="chart" id="c-monate"></div></div>`;
+  const am = (d.ausgabenmonat || []).filter((r) => r.kategorie !== "Gesundheit");
+  const v3 = monateVoll(3), v6 = monateVoll(6).slice(0, 3), kat = {};
   am.forEach((r) => { const k = r.kategorie; kat[k] ||= { a: 0, b: 0 }; if (v3.includes(r.monat)) kat[k].a += +r.ausgaben / 3; if (v6.includes(r.monat)) kat[k].b += +r.ausgaben / 3; });
   const katItems = Object.entries(kat).map(([name, x]) => ({ name, wert: x.a, delta: x.a - x.b })).filter((x) => x.wert > 5).sort((a, b) => b.wert - a.wert);
-  h += `<div class="karte"><h2>Wohin das Geld geht · Ø pro Monat</h2><div class="klein muted" style="margin:-4px 0 10px">Letzte 3 Monate, in Klammern die Veränderung zu den 3 Monaten davor</div>
-    ${hbalken(katItems.slice(0, 12).map((k) => ({ ...k, zusatz: Math.abs(k.delta) >= 10 ? `(${k.delta > 0 ? "+" : "−"}${chf(Math.abs(k.delta))})` : "" })))}</div>`;
-  h += `<div class="karte"><h2>Kontostand · Prognose 90 Tage</h2><div class="chart" id="c-prognose"></div><div class="klein muted">Annahmen und Fixposten aus der Liquiditätsplanung; rote Linie = 0.</div></div>`;
+  h += sek("Wohin das Geld geht", "", `<span class="zahl">Ø pro Monat</span>`) + `<div class="karte"><div class="klein muted" style="margin:0 0 10px">Letzte 3 Monate, in Klammern die Veränderung zu den 3 davor. Quartalszahlungen verzerren diesen Vergleich.</div>
+    ${hbalken(katItems.slice(0, 10).map((k, i) => ({ ...k, punkt: KAT_FARBE[i % 8], farbe: KAT_FARBE[i % 8], zusatz: Math.abs(k.delta) >= 10 ? `(${vz(k.delta)})` : "" })))}</div>`;
   const abos = d.abos || [];
-  h += `<div class="karte"><h2>Fixkosten und Abos</h2>${abos.length ? `<ul class="liste">${abos.map((a) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(a.name)}</div><div class="meta">${esc(a.rhythmus || "")}${a.vorschlag ? " · " + esc(a.vorschlag) : ""}</div></div><div class="r">${chf(+a.betrag, 2)}</div></div></li>`).join("")}</ul>` : '<div class="leer">Noch keine erkannt.</div>'}</div>`;
-  const bu = (d.buchungen || []).filter((x) => !x.intern && +x.betrag < 0).slice(0, 15);
-  h += `<div class="karte"><h2>Letzte Ausgaben</h2><ul class="liste">${bu.map((x) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(x.text)}</div><div class="meta">${datumKurz(x.datum)} · ${esc(x.kategorie || "")}${x.konto === "kreditkarte" ? " · Karte" : ""}</div></div><div class="r">${chf(-x.betrag, 2)}</div></div></li>`).join("")}</ul></div>`;
+  h += sek("Fixkosten und Abos", abos.length) + `<div class="karte liste-karte">${abos.length ? `<ul class="liste">${abos.map((a) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(haendler(a.name))}</div><div class="meta">${esc(a.rhythmus || "")}${a.vorschlag ? " · " + esc(a.vorschlag) : ""}</div></div><div class="r" data-privat>${chf(+a.betrag, 2)}</div></div></li>`).join("")}</ul>` : '<div class="leer">Noch keine erkannt.</div>'}</div>`;
+  const bu = (d.buchungen || []).filter((x) => !x.intern && +x.betrag < 0 && x.kategorie !== "Gesundheit").slice(0, 20), tage = {};
+  bu.forEach((x) => (tage[x.datum] ||= []).push(x));
+  const katFarbe = Object.fromEntries(katItems.map((k, i) => [k.name, KAT_FARBE[i % 8]]));
+  h += sek("Letzte Ausgaben") + `<div class="karte">${Object.entries(tage).map(([t, xs]) => `<div class="tag">${datumKurz(t)}<span class="muted" data-privat> · ${chf(-xs.reduce((s, x) => s + +x.betrag, 0))}</span></div>
+    ${xs.map((x) => `<div class="reihe buch"><div class="l"><span class="kp" style="--c:${katFarbe[x.kategorie] || "var(--text-3)"}"></span>${esc(haendler(x.text))}<span class="meta"> · ${esc(x.kategorie || "Unklar")}${x.konto === "kreditkarte" ? " · Karte" : ""}</span></div><div class="r" data-privat>${chf(-x.betrag, 2)}</div></div>`).join("")}`).join("") || '<div class="leer">Keine Buchungen der letzten 45 Tage.</div>'}</div>`;
   return h;
 }
 function chartsGeld() {
+  const ds = datenStand();
   const fm = (S.d?.finanzmonat || []).slice(-12);
-  balken("c-monate", { labels: fm.map((m) => MONATE[new Date(m.monat).getMonth()]),
-    serien: [{ name: "Einnahmen", farbe: "var(--s1)", werte: fm.map((m) => +m.einnahmen || 0) }, { name: "Ausgaben", farbe: "var(--s2)", werte: fm.map((m) => +m.ausgaben || 0) }] });
-  linie("c-prognose", { punkte: (S.d?.prognose || []).map((p) => ({ x: p.datum, y: +p.saldo })), nullLinie: true, heuteMarke: true });
+  const unvoll = fm.map((m) => { const e = new Date(m.monat); e.setMonth(e.getMonth() + 1); e.setDate(0); return !ds.buchungen || isoTag(e) > ds.buchungen; });
+  balken("c-monate", { labels: fm.map((m) => { const x = new Date(m.monat); return `${MONATE[x.getMonth()]} ${String(x.getFullYear()).slice(2)}`; }),
+    serien: [{ name: "Einnahmen", farbe: "var(--s1)", werte: fm.map((m) => +m.einnahmen || 0) }, { name: "Ausgaben", farbe: "var(--s2)", werte: fm.map((m) => +m.ausgaben || 0) }],
+    umriss: unvoll, aria: "Einnahmen und Ausgaben pro Monat; unvollständige Monate gestrichelt" });
+  linie("c-prognose", { punkte: (S.d?.prognose || []).map((p) => ({ x: p.datum, y: +p.saldo })), nullLinie: true, heuteMarke: true, treppe: true, tief: true,
+    fmt: (v) => chf(v).replace("-", MINUS), aria: "Prognose des Kontostands mit Minus-Phasen" });
 }
 
-function seiteDepot() {
-  const pos = S.d?.depot || [];
-  const ohneCfd = pos.filter((p) => p.art !== "CFD");
-  const wert = ohneCfd.reduce((s, p) => s + (+p.wert_chf || 0), 0);
+// ---------------------------------------------------------------- Depot
+const HEBEL = { "18MF:xetr": 2 };
+function depotZahlen() {
+  const d = S.d || {}, pos = d.depot || [];
+  const heb = { ...HEBEL, ...Object.fromEntries((d.instrumente || []).map((i) => [i.symbol, +i.hebel || 1])) };
+  const ws = pos.filter((p) => p.art !== "CFD"), cfd = pos.filter((p) => p.art === "CFD");
+  const wertWs = ws.reduce((s, p) => s + (+p.wert_chf || 0), 0), cfdBew = cfd.reduce((s, p) => s + (+p.wert_chf || 0), 0);
+  const vl = (d.depotverlauf || []).slice(-1)[0], cash = vl ? +vl.cash_chf || 0 : 0;
+  const nav = wertWs + cfdBew + cash;
+  const kern = ws.filter((p) => p.topf === "kern").reduce((s, p) => s + (+p.wert_chf || 0), 0);
+  const kernEng = ws.filter((p) => p.topf === "kern").reduce((s, p) => s + (+p.wert_chf || 0) * (heb[p.symbol] || 1), 0);
+  const tradEng = ws.filter((p) => p.topf !== "kern").reduce((s, p) => s + (+p.wert_chf || 0) * (heb[p.symbol] || 1), 0);
+  const cfdEng = cfd.reduce((s, p) => s + Math.abs(+p.engagement_chf || 0), 0);
+  const brutto = kernEng + tradEng + cfdEng;
+  const groesste = ws.reduce((m, p) => (+p.wert_chf > (m ? +m.wert_chf : -1) ? p : m), null);
+  const effPos = wertWs ** 2 / Math.max(1e-9, ws.reduce((s, p) => s + (+p.wert_chf || 0) ** 2, 0));
   const gv = pos.reduce((s, p) => s + (+p.gv_chf || 0), 0);
-  const kern = ohneCfd.filter((p) => p.topf === "kern").reduce((s, p) => s + (+p.wert_chf || 0), 0);
-  const cfdEng = pos.filter((p) => p.art === "CFD").reduce((s, p) => s + Math.abs(+p.engagement_chf || 0), 0);
-  const stand = pos[0]?.stand;
-  let h = einschaetzungKarte("depot");
-  h += `<div class="kacheln">${kachel("Depotwert", chf(wert), stand ? "Stand " + datumKurz(stand) : "")}${kachel("G/V offen", (gv >= 0 ? "+" : "−") + chf(Math.abs(gv)), "inkl. CFD", gv >= 0 ? "gut" : "schlecht")}
-    ${kachel("Kern CL2", pct(kern / Math.max(1, wert)), chf(kern) + " CHF")}${kachel("CFD-Engagement", chf(cfdEng), "Hebel separat")}</div>`;
-  const teile = ohneCfd.filter((p) => +p.wert_chf > 0).sort((a, b) => b.wert_chf - a.wert_chf);
-  const farben = ["var(--s1)", "var(--s2)", "var(--s3)"];
-  const gruppen = [["Kern (CL2)", teile.filter((p) => p.topf === "kern")], ["Trading-Topf", teile.filter((p) => p.topf !== "kern")]];
-  h += `<div class="karte"><h2>Aufteilung</h2><div class="stapel">${gruppen.map(([n, ps], i) => { const v = ps.reduce((s, p) => s + +p.wert_chf, 0); return v ? `<i style="width:${(v / Math.max(1, wert)) * 100}%;background:${farben[i]}" title="${esc(n)}"></i>` : ""; }).join("")}</div>
-    <div class="legende">${gruppen.map(([n, ps], i) => `<span style="--c:${farben[i]}">${esc(n)} ${pct(ps.reduce((s, p) => s + +p.wert_chf, 0) / Math.max(1, wert))}</span>`).join("")}</div></div>`;
-  h += `<div class="karte"><h2>Positionen</h2><ul class="liste">${[...pos].sort((a, b) => (+b.wert_chf || 0) - (+a.wert_chf || 0)).map((p) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(p.name || p.symbol)}</div>
-    <div class="meta">${p.art === "CFD" ? '<span class="chip gelb">CFD</span>' : `<span class="chip">${esc(p.topf === "kern" ? "Kern" : "Trading")}</span>`}${p.menge ? nf0.format(p.menge) + " Stk." : ""}</div></div>
-    <div class="r">${p.art === "CFD" ? `<div>${chf(Math.abs(+p.engagement_chf))}</div><div class="meta">Engagement</div>` : `<div>${chf(+p.wert_chf)}</div>`}<div class="meta ${+p.gv_chf >= 0 ? "gut" : "schlecht"}">${+p.gv_chf >= 0 ? "+" : "−"}${chf(Math.abs(+p.gv_chf || 0))}${p.gv_pct != null ? " · " + pct(+p.gv_pct, 1) : ""}</div></div></div></li>`).join("") || '<li class="leer">Keine Depotdaten.</li>'}</ul></div>`;
+  return { pos, ws, cfd, wertWs, cfdBew, cash, nav, kern, kernEng, tradEng, cfdEng, brutto, groesste, effPos, gv, vl, heb, stand: pos[0]?.stand };
+}
+function seiteDepot() {
+  const z = depotZahlen(), ds = datenStand();
+  const fmtV = (x) => vz(x);
+  let h = hero({ label: "Depot (Saxo)", einheit: "CHF", wert: chf(z.nav),
+    sub: `<span class="muted">Wertschriften ${chf(z.wertWs)} · CFD ${vz(z.cfdBew)} · Cash ${chf(z.cash)}</span><br>${standChip(ds.depot, 4, "Stand")}${z.vl && Math.abs(+z.vl.wert_chf - z.nav) / Math.max(1, z.nav) > 0.005 ? `<span class="chip">Saxo-Kontowert ${chf(+z.vl.wert_chf)}</span>` : ""}` });
+  h += zeileKpi([
+    { name: "G/V offen", wert: fmtV(z.gv), cls: z.gv >= 0 ? "gut" : "schlecht", sub: "inkl. CFD" },
+    { name: "Effektiver Hebel", wert: (z.brutto / Math.max(1, z.nav)).toFixed(1).replace(".", ",") + "×", sub: `Engagement ${chf(z.brutto)}` },
+    { name: "Grösste Position", wert: pct((+z.groesste?.wert_chf || 0) / Math.max(1, z.wertWs)), sub: `≈ ${nf0.format(z.effPos)} gleich grosse` },
+  ]);
+  h += einschaetzungKarte("depot");
+  const mx = Math.max(z.brutto, z.nav);
+  const zeile = (name, teile) => `<div class="aufteil"><div class="klein muted">${name}</div><div class="stapel" style="width:${(teile.reduce((s, t) => s + t.wert, 0) / Math.max(1, mx)) * 100}%">${teile.filter((t) => t.wert > 0).map((t) => `<i style="flex:${t.wert} 0 0;background:${t.farbe}" title="${esc(t.name)}"></i>`).join("")}</div></div>`;
+  h += sek("Aufteilung") + `<div class="karte">${zeile("Marktwert", [{ name: "Kern", wert: z.kern, farbe: "var(--s1)" }, { name: "Trading", wert: z.wertWs - z.kern, farbe: "var(--s2)" }, { name: "Cash", wert: z.cash, farbe: "var(--text-3)" }])}
+    ${zeile("Engagement (mit Hebel)", [{ name: "Kern", wert: z.kernEng, farbe: "var(--s1)" }, { name: "Trading", wert: z.tradEng, farbe: "var(--s2)" }, { name: "CFD", wert: z.cfdEng, farbe: "var(--s4)" }])}
+    <div class="legende"><span style="--c:var(--s1)">Kern ${pct(z.kern / Math.max(1, z.nav))}</span><span style="--c:var(--s2)">Trading ${pct((z.wertWs - z.kern) / Math.max(1, z.nav))}</span><span style="--c:var(--s4)">CFD-Engagement ${chf(z.cfdEng)}</span><span style="--c:var(--text-3)">Cash ${chf(z.cash)}</span></div>
+    <div class="klein muted">Gleiche Skala: Der längere zweite Balken zeigt, wie stark Hebel-ETF und CFDs das Engagement über den Marktwert heben.</div></div>`;
+  const sorted = [...z.pos].sort((a, b) => (b.art === "CFD" ? Math.abs(+b.engagement_chf) : +b.wert_chf) - (a.art === "CFD" ? Math.abs(+a.engagement_chf) : +a.wert_chf));
+  h += sek("Positionen", z.pos.length) + `<div class="karte">${meter(sorted.map((p) => ({
+    name: `${esc(p.name || p.symbol)} ${p.art === "CFD" ? '<span class="chip gelb">CFD</span>' : (z.heb[p.symbol] || 1) > 1 ? `<span class="chip">${z.heb[p.symbol]}×</span>` : ""}`,
+    wert: p.art === "CFD" ? 0 : +p.wert_chf, umriss: p.art === "CFD" ? Math.abs(+p.engagement_chf) : null,
+    text: `<span data-privat>${p.art === "CFD" ? chf(Math.abs(+p.engagement_chf)) : chf(+p.wert_chf)}</span> <span class="${+p.gv_chf >= 0 ? "gut" : "schlecht"}">${p.gv_pct != null ? pct(+p.gv_pct, 1).replace("-", MINUS) : vz(+p.gv_chf)}</span>`,
+    farbe: p.topf === "kern" ? "var(--s1)" : "var(--s2)",
+  })), { max: Math.max(1, ...z.pos.map((p) => (p.art === "CFD" ? Math.abs(+p.engagement_chf) : +p.wert_chf))) })}
+    <div class="klein muted">Balken = Wert (CFD: Engagement als Umriss). Rechts G/V seit Kauf.</div></div>`;
+  h += sek("Depotwert") + `<div class="karte"><div class="chart" id="c-depot"></div></div>`;
   const ch = S.d?.chancen || [];
   const art = { termin: ["Termin", "blau"], signal: ["Signal", "gruen"], idee: ["Idee", ""], risiko: ["Risiko", "rot"] };
-  h += `<div class="karte"><h2>Chancen-Radar</h2>${ch.length ? `<ul class="liste">${ch.map((c) => `<li><div class="titel">${esc(c.titel)}</div><div class="meta"><span class="chip ${art[c.art]?.[1] || ""}">${art[c.art]?.[0] || c.art}</span>${c.symbol ? `<span class="chip">${esc(c.symbol)}</span>` : ""}${c.gueltig_bis ? "bis " + datumKurz(c.gueltig_bis) : ""}</div>${c.text ? `<div class="details">${esc(c.text)}</div>` : ""}</li>`).join("")}</ul>` : '<div class="leer">Der Manager füllt das Radar beim nächsten Lauf.</div>'}</div>`;
-  if ((S.d?.depotverlauf || []).length > 1) h += `<div class="karte"><h2>Depotwert</h2><div class="chart" id="c-depot"></div></div>`;
+  h += sek("Chancen-Radar", ch.length) + `<div class="karte liste-karte">${ch.length ? `<ul class="liste">${ch.map((c) => `<li><div class="titel">${esc(c.titel)}</div><div class="meta"><span class="chip ${art[c.art]?.[1] || ""}">${art[c.art]?.[0] || c.art}</span>${c.symbol ? `<span class="chip">${esc(c.symbol)}</span>` : ""}${c.gueltig_bis ? "bis " + datumKurz(c.gueltig_bis) : ""}</div>${c.text ? `<details class="details" data-k="ch-${c.id}"${offen("ch-" + c.id)}><summary>Warum</summary>${esc(c.text)}</details>` : ""}</li>`).join("")}</ul>` : '<div class="leer">Der Manager füllt das Radar beim nächsten Lauf.</div>'}</div>`;
   const tr = S.d?.trades || [];
-  h += `<div class="karte"><h2>Letzte Trades</h2><ul class="liste">${tr.map((t) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(t.richtung)} ${esc(t.name || t.symbol)}</div><div class="meta">${datumKurz(t.datum)} · ${t.menge ? nf0.format(t.menge) + " Stk." : ""}</div></div><div class="r">${chf(Math.abs(+t.betrag_chf || 0))}</div></div></li>`).join("")}</ul></div>`;
+  h += sek("Letzte Trades", tr.length) + `<div class="karte liste-karte"><ul class="liste">${tr.map((t) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(t.richtung)} ${esc(t.name || t.symbol)}</div><div class="meta">${datumKurz(t.datum)}${t.menge ? " · " + nf0.format(t.menge) + " Stk." : ""}</div></div><div class="r" data-privat>${chf(Math.abs(+t.betrag_chf || 0))}</div></div></li>`).join("")}</ul></div>`;
   return h;
 }
-function chartsDepot() { linie("c-depot", { punkte: (S.d?.depotverlauf || []).map((p) => ({ x: p.datum, y: +p.wert_chf })) }); }
+function chartsDepot() { linie("c-depot", { punkte: (S.d?.depotverlauf || []).map((p) => ({ x: p.datum, y: +p.wert_chf })), aria: "Depotwert im Zeitverlauf" }); }
 
-function seiteUni() {
-  const d = S.d || {};
-  const kurse = d.kurse || [];
+// ---------------------------------------------------------------- Uni
+function uniDaten() {
+  const d = S.d || {}, kurse = d.kurse || [];
   const ects = kurse.filter((k) => k.ects != null);
   const bestanden = ects.filter((k) => k.status === "bestanden").reduce((s, k) => s + +k.ects, 0);
   const laufend = ects.filter((k) => ["laufend", "angemeldet"].includes(k.status)).reduce((s, k) => s + +k.ects, 0);
+  const noten = kurse.filter((k) => k.note != null && k.ects);
+  const schnitt = noten.reduce((s, k) => s + k.note * k.ects, 0) / Math.max(1, noten.reduce((s, k) => s + +k.ects, 0));
   const pruef = kurse.filter((k) => k.pruefung && new Date(k.pruefung) >= heute()).sort((a, b) => new Date(a.pruefung) - new Date(b.pruefung));
-  const abg = (d.abgaben || []).filter((a) => a.status !== "abgegeben" && a.status !== "bestanden");
+  // Abgaben ohne Doppel (Notion und Canvas melden dieselbe Abgabe)
+  const roh = (d.abgaben || []).filter((a) => !["abgegeben", "bestanden"].includes(a.status)), abg = [];
+  roh.forEach((a) => {
+    const k = (a.kurs || a.titel || "").split(/[\s.]+/)[0].toLowerCase() + "|" + (a.frist ? isoTag(a.frist) : "");
+    const da = abg.find((x) => x._k === k);
+    if (!da) abg.push({ ...a, _k: k });
+    else { if (/upload|report here|abgabe/i.test(da.titel) && !/upload|report here/i.test(a.titel)) da.titel = a.titel; if (!da.link && a.link) da.link = a.link; if (a.link && /canvas/i.test(a.link)) da.frist = a.frist; }
+  });
+  abg.forEach((a) => { if (/^upload your report here$/i.test(a.titel)) a.titel = "Abgabe " + (a.kurs || "").split(".")[0]; });
   const ma = d.ma || [];
-  const naechsterMa = ma.find((m) => m.frist && new Date(m.frist) >= heute());
-  let h = einschaetzungKarte("uni");
-  h += `<div class="kacheln">${kachel("Credits", ects.length ? `${nf0.format(bestanden)}<span class="muted" style="font-size:15px"> / 90</span>` : "–", ects.length ? `${nf0.format(laufend)} laufend` : "ECTS werden ergänzt")}
-    ${kachel("Nächste Prüfung", pruef[0] ? datumKurz(pruef[0].pruefung) : "–", pruef[0] ? esc(pruef[0].titel.slice(0, 28)) : "")}
-    ${kachel("Abgaben offen", abg.length, abg[0]?.frist ? "nächste " + fristText(abg[0].frist) : "")}
-    ${kachel("Masterarbeit", naechsterMa ? datumKurz(naechsterMa.frist) : "Jan. 27", naechsterMa ? "nächster Meilenstein" : "Abgabe")}</div>`;
-  h += `<div class="karte"><h2>Abgaben und Prüfungen</h2><ul class="liste">${[
-    ...abg.map((a) => ({ t: a.frist, titel: a.titel, sub: a.kurs, link: a.link, chip: "Abgabe", id: a.id })),
-    ...pruef.map((k) => ({ t: k.pruefung, titel: "Prüfung " + k.titel, sub: k.pruefungsart || "", chip: "Prüfung" })),
-  ].sort((a, b) => new Date(a.t || 8e15) - new Date(b.t || 8e15)).map((x) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(x.titel)}</div><div class="meta">${esc(x.sub || "")}${x.link ? ` · <a href="${esc(x.link)}" target="_blank" rel="noopener">Canvas</a>` : ""}</div></div>
-    <div class="r"><span class="chip ${x.t && new Date(x.t) < plusTage(7) ? "gelb" : "blau"}">${x.t ? fristText(x.t, true) : "offen"}</span><div class="meta">${x.chip}</div></div></div></li>`).join("") || '<li class="leer">Nichts offen.</li>'}</ul></div>`;
-  h += `<div class="karte"><h2>Masterarbeit · Meilensteine</h2><ul class="liste">${ma.map((m) => { const t = m.titel.replace(/^Frist:\s*MA-Meilenstein:\s*/, "").replace(/\s*\((Mo|Di|Mi|Do|Fr|Sa|So) [^)]*\)\s*$/, "");
-    return `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(t)}</div></div><div class="r"><span class="chip ${["erledigt"].includes(m.status) ? "gruen" : new Date(m.frist) < new Date() ? "rot" : "blau"}">${m.status === "erledigt" ? "erledigt" : fristText(m.frist)}</span></div></div></li>`; }).join("") || '<li class="leer">Keine Meilensteine erfasst.</li>'}
-    <li><div class="reihe"><div class="l"><div class="titel">Abgabe Masterarbeit</div></div><div class="r"><span class="chip blau">Januar 2027</span></div></div></li></ul></div>`;
-  h += `<div class="karte"><h2>Kurse</h2><ul class="liste">${kurse.map((k) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(k.titel)}</div><div class="meta">${esc(k.semester || "")}${k.notiz ? " · " + esc(k.notiz) : ""}</div></div><div class="r">${k.ects ? `<div>${k.ects} ECTS</div>` : ""}${k.pruefung ? `<div class="meta">${datumKurz(k.pruefung)}</div>` : ""}</div></div></li>`).join("")}</ul></div>`;
-  h += terminKarte((d.termine || []).filter((t) => terminArt(t) === "uni" && new Date(t.ende || t.start) >= new Date()).slice(0, 20), "Uni-Termine");
+  const maAbgabe = (d.meilensteine || []).find((m) => /masterarbeit/i.test(m.titel) && /abgeb|abgabe/i.test(m.titel) && m.datum);
+  return { kurse, bestanden, laufend, schnitt, noten, pruef, abg, ma, maAbgabe };
+}
+function seiteUni() {
+  const u = uniDaten(), ziel = 90;
+  const bar = `<div class="ects"><i style="width:${Math.min(100, (u.bestanden / ziel) * 100)}%"></i><b style="width:${Math.min(100 - (u.bestanden / ziel) * 100, (u.laufend / ziel) * 100)}%"></b><span class="ziel" style="left:${Math.min(100, (ziel / Math.max(ziel, u.bestanden + u.laufend)) * 100)}%"></span></div>`;
+  let h = hero({ label: "ECTS bestanden", wert: `${nf0.format(u.bestanden)}<small> / ${ziel}</small>`, sub: `+ ${nf0.format(u.laufend)} laufend = ${nf0.format(u.bestanden + u.laufend)}${u.bestanden + u.laufend >= ziel ? " ✓ reicht" : ` · es fehlen ${ziel - u.bestanden - u.laufend}`}`, chart: bar });
+  h += zeileKpi([
+    { name: "Notenschnitt", wert: u.noten.length ? u.schnitt.toFixed(2).replace(".", ",") : "–", sub: `ECTS-gewichtet · ${u.noten.length} Kurse` },
+    { name: "Nächste Prüfung", wert: u.pruef[0] ? datumKurz(u.pruef[0].pruefung) : "–", sub: u.pruef[0] ? `in ${tageBis(u.pruef[0].pruefung)} T · ${esc(u.pruef[0].titel.length > 18 ? u.pruef[0].titel.slice(0, 17) + "…" : u.pruef[0].titel)}` : "" },
+    { name: "Masterarbeit", wert: u.maAbgabe ? `${tageBis(u.maAbgabe.datum)} T` : "–", sub: u.maAbgabe ? `Abgabe ${datumKurz(u.maAbgabe.datum)} ${new Date(u.maAbgabe.datum).getFullYear()}` : "" },
+  ]);
+  h += einschaetzungKarte("uni");
+  h += sek("Fristen bis zur Abgabe") + `<div class="karte"><div class="chart" id="c-fristen"></div></div>`;
+  const in14 = plusTage(15);
+  const liste = [
+    ...u.abg.map((a) => ({ t: a.frist, titel: a.titel, sub: a.kurs !== a.titel ? (a.kurs || "").split("(")[0] : "", link: a.link, art: "Abgabe" })),
+    ...u.pruef.map((k) => ({ t: k.pruefung, titel: "Prüfung " + k.titel, sub: k.pruefungsart || "", art: "Prüfung" })),
+    ...u.ma.filter((m) => m.status !== "erledigt").map((m) => ({ t: m.frist, titel: m.titel.replace(/^Frist:\s*MA-Meilenstein:\s*/, "MA: ").replace(/\s*\((Mo|Di|Mi|Do|Fr|Sa|So) [^)]*\)\s*$/, ""), art: "Masterarbeit" })),
+    ...(S.d?.termine || []).filter((t) => terminArt(t) === "uni" && !istBlock(t)).map((t) => ({ t: t.start, titel: terminTitel(t.titel), sub: t.ort || "", art: "Termin" })),
+  ].filter((x) => x.t && new Date(x.t) >= (x.art === "Termin" ? new Date() : heute())).sort((a, b) => new Date(a.t) - new Date(b.t));
+  const nah = liste.filter((x) => new Date(x.t) < in14), spaeter = liste.filter((x) => new Date(x.t) >= in14);
+  const zeile = (x) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(x.titel)}</div><div class="meta">${esc(x.art)}${x.sub ? " · " + esc(x.sub) : ""}${x.link ? ` · <a href="${esc(x.link)}" target="_blank" rel="noopener">Canvas</a>` : ""}</div></div>
+    <div class="r"><span class="chip ${new Date(x.t) < plusTage(7) ? "gelb" : "blau"}">${fristText(x.t, true)}</span></div></div></li>`;
+  h += sek("Nächste 14 Tage", nah.length) + `<div class="karte liste-karte"><ul class="liste">${nah.map(zeile).join("") || '<li class="leer">Nichts in den nächsten 14 Tagen.</li>'}</ul>
+    ${spaeter.length ? `<details class="details" data-k="uni-spaeter"${offen("uni-spaeter")}><summary>${spaeter.length} danach</summary><ul class="liste">${spaeter.map(zeile).join("")}</ul></details>` : ""}</div>`;
+  const aktiv = u.kurse.filter((k) => k.status !== "bestanden"), fertig = u.kurse.filter((k) => k.status === "bestanden");
+  const kz = (k) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(k.titel)}</div><div class="meta">${esc(k.semester || "")}${k.pruefung ? " · Prüfung " + datumKurz(k.pruefung) : ""}${k.status !== "bestanden" ? ` · <span class="chip ${k.status === "laufend" ? "blau" : ""}">${esc(k.status)}</span>` : ""}</div>
+    ${k.notiz ? `<details class="details" data-k="k-${k.id}"${offen("k-" + k.id)}><summary>Notiz</summary>${esc(k.notiz)}</details>` : ""}</div><div class="r">${k.ects ? `<div>${k.ects} ECTS</div>` : ""}${k.note != null ? `<div class="meta">Note ${String(k.note).replace(".", ",")}</div>` : ""}</div></div></li>`;
+  h += sek("Kurse", u.kurse.length) + `<div class="karte liste-karte"><ul class="liste">${aktiv.map(kz).join("")}</ul>
+    ${fertig.length ? `<details class="details" data-k="uni-fertig"${offen("uni-fertig")}><summary>${fertig.length} bestanden · ${nf0.format(u.bestanden)} ECTS</summary><ul class="liste">${fertig.map(kz).join("")}</ul></details>` : ""}</div>`;
   return h;
 }
+function chartsUni() {
+  const u = uniDaten(), bis = u.maAbgabe ? new Date(u.maAbgabe.datum) : plusTage(90); bis.setDate(bis.getDate() + 5);
+  bahnen("c-fristen", { von: plusTage(-2), bis, bahnen: [
+    { name: "Prüfungen", farbe: "var(--s8)", punkte: u.pruef.map((k) => ({ t: k.pruefung, titel: "Prüfung " + k.titel })) },
+    { name: "Abgaben", farbe: "var(--s2)", punkte: u.abg.filter((a) => a.frist).map((a) => ({ t: a.frist, titel: a.titel })) },
+    { name: "Masterarbeit", farbe: "var(--s7)", punkte: [...u.ma.filter((m) => m.frist).map((m) => ({ t: m.frist, titel: m.titel.replace(/^Frist:\s*MA-Meilenstein:\s*/, "") })), ...(u.maAbgabe ? [{ t: u.maAbgabe.datum, titel: "Abgabe Masterarbeit" }] : [])] },
+  ] });
+}
 
+// ---------------------------------------------------------------- 5 Jahre
+const BEREICH_FARBE = { Karriere: "var(--s1)", Finanzen: "var(--s2)", Vorsorge: "var(--s3)", Steuern: "var(--s4)", Wohnen: "var(--s5)", Versicherung: "var(--s6)", Weiterbildung: "var(--s7)", Studium: "var(--s8)", Admin: "var(--text-3)" };
+const wartetJob = (m) => /jobwechsel|jobstart/i.test(m.zeitraum || "");
 function seitePlan() {
-  const ms = S.d?.meilensteine || [];
+  const ms = (S.d?.meilensteine || []).filter((m) => m.status !== "verworfen");
   const jetzt = ms.filter((m) => m.status === "geplant" && m.jetzt_tun).sort((a, b) => a.prioritaet - b.prioritaet || new Date(a.datum || 8e15) - new Date(b.datum || 8e15));
-  const farbe = { Karriere: "var(--s1)", Finanzen: "var(--s2)", Vorsorge: "var(--s3)", Weiterbildung: "var(--s7)", Steuern: "var(--s4)", Wohnen: "var(--s5)", Versicherung: "var(--s6)", Studium: "var(--s3)" };
-  let h = einschaetzungKarte("langfrist");
-  h += `<div class="karte"><h2>Jetzt anstossen · ${jetzt.length}</h2><ul class="liste">${jetzt.slice(0, 8).map((m) => `<li data-ms="${m.id}"><div class="titel">${esc(m.titel)}</div><div class="meta"><span class="chip">${esc(m.bereich)}</span>${m.zeitraum ? esc(m.zeitraum) : m.datum ? datumKurz(m.datum) + " " + new Date(m.datum).getFullYear() : ""}</div>
-    <div class="details">${esc(m.jetzt_tun)}</div>${m.warum ? `<details class="details"><summary>Warum</summary>${esc(m.warum)}</details>` : ""}
-    <div class="knoepfe" style="display:flex;gap:8px;margin-top:8px"><button class="knopf gut" data-ms-akt="angestossen">${IC.ok}Angestossen</button><button class="knopf weg" data-ms-akt="verworfen">${IC.weg}Nicht relevant</button></div></li>`).join("") || '<li class="leer">Nichts dringend.</li>'}</ul></div>`;
+  const in90 = ms.filter((m) => m.status !== "erledigt" && m.datum && tageBis(m.datum) <= 90 && tageBis(m.datum) >= -30).length;
+  let h = hero({ label: "Nächste 5 Jahre", wert: nf0.format(ms.filter((m) => m.status !== "erledigt").length), sub: `Meilensteine · ${in90} in 90 Tagen · ${jetzt.length} jetzt anstossen`, chart: `<div class="chart" id="c-jahre"></div>` });
+  h += einschaetzungKarte("langfrist");
+  const zeigen = S.alleMs ? jetzt : jetzt.slice(0, 3);
+  h += sek("Jetzt anstossen", jetzt.length) + `<div class="karte liste-karte"><ul class="liste">${zeigen.map((m) => `<li data-ms="${m.id}"><div class="titel">${esc(m.titel)}</div><div class="meta"><span class="chip" style="color:${BEREICH_FARBE[m.bereich] || "inherit"}">${esc(m.bereich)}</span>${m.zeitraum ? esc(m.zeitraum) : m.datum ? datumKurz(m.datum) + " " + new Date(m.datum).getFullYear() : ""}</div>
+    <div class="details">${esc(m.jetzt_tun)}</div>${m.warum ? `<details class="details" data-k="ms-${m.id}"${offen("ms-" + m.id)}><summary>Warum</summary>${esc(m.warum)}</details>` : ""}
+    <div class="knoepfe-zeile"><button class="knopf gut" data-ms-akt="angestossen">${IC.ok}Angestossen</button><button class="knopf weg" data-ms-akt="verworfen">${IC.weg}Nicht relevant</button></div></li>`).join("") || '<li class="leer">Nichts dringend.</li>'}</ul>
+    ${jetzt.length > 3 ? `<button class="knopf mehrzeigen" id="alle-ms">${S.alleMs ? "Weniger" : `+${jetzt.length - 3} weitere`}</button>` : ""}</div>`;
   const jahre = {};
-  ms.filter((m) => m.status !== "verworfen").forEach((m) => { const j = m.datum ? new Date(m.datum).getFullYear() : (m.zeitraum?.match(/20\d\d/)?.[0] || "offen"); (jahre[j] ||= []).push(m); });
-  h += `<div class="karte"><h2>Zeitstrahl</h2><div class="zeitstrahl">${Object.keys(jahre).sort().map((j) => `<div class="jahr">${j}</div>${jahre[j].map((m) => `<div class="ms ${m.status === "erledigt" ? "erledigt" : ""}" style="--c:${farbe[m.bereich] || "var(--accent)"}"><div class="titel" style="font-weight:500">${esc(m.titel)}</div><div class="meta"><span class="chip">${esc(m.bereich)}</span>${m.zeitraum ? esc(m.zeitraum) : m.datum ? datumKurz(m.datum) : ""}${m.status !== "geplant" ? ` · ${esc(m.status)}` : ""}</div></div>`).join("")}`).join("") || '<div class="leer">Noch leer.</div>'}</div></div>`;
+  ms.forEach((m) => { const j = m.datum ? new Date(m.datum).getFullYear() : (m.zeitraum?.match(/20\d\d/)?.[0] || "offen"); (jahre[j] ||= []).push(m); });
+  h += sek("Zeitstrahl") + `<div class="karte"><div class="zeitstrahl">${Object.keys(jahre).sort().map((j) => `<div class="jahr">${j}</div>${jahre[j].sort((a, b) => new Date(a.datum || 8e15) - new Date(b.datum || 8e15)).map((m) => `<div class="ms ${m.status === "erledigt" ? "erledigt" : ""} ${wartetJob(m) ? "hohl" : ""}" style="--c:${BEREICH_FARBE[m.bereich] || "var(--accent)"}"><div class="titel" style="font-weight:500">${esc(m.titel)}</div><div class="meta"><span class="chip">${esc(m.bereich)}</span>${wartetJob(m) ? "wartet auf Jobstart" : m.zeitraum ? esc(m.zeitraum) : m.datum ? datumKurz(m.datum) : ""}${m.status !== "geplant" ? ` · ${esc(m.status)}` : ""}</div></div>`).join("")}`).join("") || '<div class="leer">Noch leer.</div>'}</div>
+    <div class="legende" style="margin-top:12px">${Object.entries(BEREICH_FARBE).filter(([b]) => ms.some((m) => m.bereich === b)).map(([b, f]) => `<span style="--c:${f}">${b}</span>`).join("")}</div></div>`;
   return h;
+}
+function chartsPlan() {
+  const el = document.getElementById("c-jahre"); if (!el) return;
+  const ms = (S.d?.meilensteine || []).filter((m) => m.status !== "verworfen");
+  const j0 = new Date().getFullYear(), j1 = j0 + 5, W = Math.max(300, el.clientWidth || 340), H = 64, L = 6, R = 6;
+  const X = (t) => L + ((t - +new Date(j0, 0, 1)) / (+new Date(j1, 0, 1) - +new Date(j0, 0, 1))) * (W - L - R);
+  let s = `<line class="grid" x1="${L}" x2="${W - R}" y1="34" y2="34"/>`;
+  for (let j = j0; j <= j1; j++) s += `<line class="grid" x1="${X(+new Date(j, 0, 1))}" x2="${X(+new Date(j, 0, 1))}" y1="26" y2="42"/><text class="ax" x="${X(+new Date(j, 0, 1)) + (j === j1 ? -2 : 2)}" y="58" text-anchor="${j === j1 ? "end" : "start"}">${j}</text>`;
+  const belegt = {};
+  ms.forEach((m) => {
+    const t = m.datum ? +new Date(m.datum) : (m.zeitraum?.match(/20\d\d/) ? +new Date(+m.zeitraum.match(/20\d\d/)[0], 6, 1) : null);
+    if (t == null || t > +new Date(j1, 0, 1)) return;
+    const x = Math.round(X(Math.max(t, +new Date(j0, 0, 1))) / 9) * 9, stufe = (belegt[x] = (belegt[x] || 0) + 1) - 1;
+    s += `<circle cx="${x}" cy="${34 - stufe * 9}" r="4" fill="${wartetJob(m) ? "var(--surface)" : BEREICH_FARBE[m.bereich] || "var(--accent)"}" stroke="${BEREICH_FARBE[m.bereich] || "var(--accent)"}" stroke-width="1.6" opacity="${m.status === "erledigt" ? ".4" : "1"}" data-tip="${esc(`${m.titel} · ${m.datum ? datumKurz(m.datum) + " " + new Date(m.datum).getFullYear() : m.zeitraum || ""}`)}"/>`;
+  });
+  const h0 = X(+heute()); s += `<line x1="${h0}" x2="${h0}" y1="6" y2="42" stroke="var(--crit)" stroke-width="1.2"/>`;
+  el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Meilensteine der nächsten fünf Jahre">${s}</svg>`; tipAn(el);
 }
 
 // ---------------------------------------------------------------- Rahmen
 function kopf(titel) {
-  const sync = S.d?.sync || [];
+  const sync = S.d?.sync || [], ds = datenStand();
   const alt = (q, std) => { const x = sync.find((s) => s.quelle === q); return !x ? "fehler" : !x.ok ? "fehler" : (Date.now() - new Date(x.zuletzt)) / 36e5 > std ? "alt" : ""; };
-  const zustand = [alt("speicher", 1), alt("finanzen", 30), alt("depot", 30)];
-  const schlecht = zustand.includes("fehler") ? "fehler" : zustand.includes("alt") ? "alt" : "";
-  return `<header class="kopf"><div><h1>${titel}</h1><div class="unter"><span class="punkt ${schlecht}"></span> ${S.offline ? "offline · " : ""}Stand ${S.geladen ? alter(S.geladen) : "–"}</div></div>
-    <div class="rechts">${S.tab === "heute" ? `<button class="rund" id="b-filter" aria-label="Ausgeblendetes">${IC.filter}</button>` : ""}<button class="rund" id="b-speicher" aria-label="Speicher: alle Seiten und Datenbanken">${IC.buch}</button><button class="rund" id="b-neu" aria-label="Neu laden">${IC.neu}</button></div></header>`;
+  const z = [alt("speicher", 1)];
+  if (S.tab === "geld") z.push(ds.saldo && tageSeit(ds.saldo) > 7 ? "alt" : "");
+  if (S.tab === "depot") z.push(ds.depot && tageSeit(ds.depot) > 4 ? "alt" : "");
+  const schlecht = z.includes("fehler") ? "fehler" : z.includes("alt") ? "alt" : "";
+  let unter = `${S.offline ? "offline · " : ""}Stand ${S.geladen ? alter(S.geladen) : "–"}`;
+  if (S.tab === "heute" && !S.sp) { const hz = heuteZahlen(); unter = `${hz.faellig ? `${hz.faellig} fällig${hz.minuten ? ` · ${hz.minuten} Min.` : ""}` : "nichts fällig"} · ${S.offline ? "offline" : alter(S.geladen)}`; }
+  return `<header class="kopf"><div><h1>${titel}</h1><div class="unter"><span class="punkt ${schlecht}" id="b-sync" role="button" aria-label="Datenstand"></span> ${unter}</div></div>
+    <div class="rechts"><button class="rund" id="b-speicher" aria-label="Speicher: alle Seiten und Datenbanken">${IC.buch}</button><button class="rund" id="b-neu" aria-label="Neu laden">${IC.neu}</button></div></header>`;
+}
+function syncBlatt() {
+  const sync = S.d?.sync || [], ds = datenStand();
+  blatt(`<h3>Datenstand</h3><div class="meta" style="margin-bottom:8px">${standChip(ds.saldo, 7, "Saldo")}${standChip(ds.buchungen, 35, "Buchungen")}${standChip(ds.depot, 4, "Saxo")}</div>
+    <ul class="liste">${sync.sort((a, b) => a.quelle.localeCompare(b.quelle)).map((x) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500"><span class="punkt ${x.ok ? "" : "fehler"}"></span> ${esc(x.quelle)}</div><div class="meta">${esc(x.meldung || "")}</div></div><div class="r meta">${alter(x.zuletzt)}</div></div></li>`).join("")}</ul>
+    <div class="hinweis">Lange auf eine Zahl drücken blendet alle Beträge aus (Privatsphäre).</div>`);
 }
 function render() {
   const app = $("#app");
@@ -484,28 +848,42 @@ function render() {
   const sp = !!S.sp;
   const seite = sp ? seiteSpeicher() : { heute: seiteHeute, jobs: seiteJobs, geld: seiteGeld, depot: seiteDepot, uni: seiteUni, plan: seitePlan }[key]();
   const y = window.scrollY;
-  app.innerHTML = `${kopf(sp ? "Speicher" : titel)}<main>${seite}</main>
+  app.innerHTML = `${kopf(sp ? "Speicher" : titel)}<main class="tab-${key}">${seite}</main>
     <button class="plus" id="b-plus" aria-label="Neu">${IC.plus}</button>
-    <nav class="tabs">${TABS.map(([k, n]) => `<button class="${k === key ? "an" : ""}" data-tab="${k}">${IC[k]}<span>${n}</span></button>`).join("")}</nav>`.replace(sp ? /class="an" data-tab/ : /^$/, sp ? 'class="" data-tab' : "");
+    <nav class="tabs" role="tablist">${TABS.map(([k, n]) => `<button role="tab" aria-selected="${k === key && !sp}" class="${k === key && !sp ? "an" : ""}" data-tab="${k}">${IC[k]}<span>${n}</span></button>`).join("")}</nav>`;
   const rk = sp ? "sp:" + S.sp.art + (S.sp.id || "") : key;
   if (render.letzterTab === rk) window.scrollTo(0, y); render.letzterTab = rk;
-  if (!sp) ({ jobs: chartsJobs, geld: chartsGeld, depot: chartsDepot }[key] || (() => {}))();
+  if (!sp) ({ jobs: chartsJobs, geld: chartsGeld, depot: chartsDepot, uni: chartsUni, plan: chartsPlan }[key] || (() => {}))();
   binden();
 }
 function binden() {
-  $$("nav.tabs button").forEach((b) => b.onclick = () => { S.tab = b.dataset.tab; speicher.set("cockpit-tab", S.tab); S.mehr = false; if (S.sp) { S.sp = null; history.replaceState(null, "", location.pathname + location.search); } window.scrollTo(0, 0); render(); });
+  $$("nav.tabs button").forEach((b) => b.onclick = () => {
+    const los = () => { S.tab = b.dataset.tab; speicher.set("cockpit-tab", S.tab); S.mehr = false; if (S.sp) { S.sp = null; history.replaceState(null, "", location.pathname + location.search); } window.scrollTo(0, 0); render(); };
+    document.startViewTransition ? document.startViewTransition(los) : los();
+  });
   const bs = $("#b-speicher"); if (bs) bs.onclick = () => { location.hash = "#s/"; };
   spBinden();
-  $("#b-neu").onclick = () => { toast("Lade neu …", [], 1200); laden(); };
+  $("#b-neu").onclick = () => { $("#b-sync")?.classList.add("puls"); toast("Lade neu …", [], 1200); laden(); };
+  $("#b-sync").onclick = syncBlatt;
   $("#b-plus").onclick = neuBlatt;
-  const f = $("#b-filter"); if (f) f.onclick = ignorierBlatt;
+  const f = $("#b-filter2"); if (f) f.onclick = ignorierBlatt;
   const m = $("#mehr"); if (m) m.onclick = () => { S.mehr = !S.mehr; render(); };
-  const w = $("#woche"); if (w) w.onclick = () => { S.woche = !S.woche; render(); };
   const bl = $("#alle-bew"); if (bl) bl.onclick = () => { S.alleBew = !S.alleBew; render(); };
-  $$(".aufgabe [data-akt]").forEach((b) => b.onclick = () => aufgabeAktion(b.closest(".aufgabe").dataset.id, b.dataset.akt));
-  $$(".entscheid [data-antwort]").forEach((b) => b.onclick = () => entscheidAntwort(b.closest(".entscheid").dataset.id, b.dataset.antwort));
+  const am = $("#alle-ms"); if (am) am.onclick = () => { S.alleMs = !S.alleMs; render(); };
+  $$("[data-dim]").forEach((b) => b.onclick = () => { S.jobDim = b.dataset.dim; render(); });
+  $$(".aufgabe .haken[data-akt]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); const li = b.closest(".aufgabe"); li.classList.add("weg"); setTimeout(() => aufgabeAktion(li.dataset.id, "erledigt"), 160); });
+  $$(".aufgabe").forEach(wischen);
+  $$("[data-oeffne]").forEach((x) => x.onclick = () => aufgabeBlatt(x.dataset.oeffne));
+  $$(".entscheid [data-antwort]").forEach((b) => b.onclick = () => { const k = b.closest(".entscheid"); entscheidAntwort(k.dataset.id, b.dataset.antwort, $(".kommentar", k)?.value.trim() || null); });
   $$("[data-ms-akt]").forEach((b) => b.onclick = () => meilenstein(b.closest("[data-ms]").dataset.ms, b.dataset.msAkt));
+  $$("[data-privat]").forEach((x) => {
+    let t; x.addEventListener("pointerdown", () => { t = setTimeout(() => { const an = !document.body.classList.contains("privat"); document.body.classList.toggle("privat", an); speicher.set("cockpit-privat", an); toast(an ? "Beträge ausgeblendet." : "Beträge sichtbar."); }, 600); });
+    ["pointerup", "pointerleave", "pointercancel"].forEach((ev) => x.addEventListener(ev, () => clearTimeout(t)));
+  });
 }
+document.body.classList.toggle("privat", !!speicher.get("cockpit-privat", false));
+let letzteY = 0;
+window.addEventListener("scroll", () => { const y = window.scrollY, p = $("#b-plus"); if (p) p.classList.toggle("versteckt", y > letzteY + 4 && y > 200); if (Math.abs(y - letzteY) > 4) letzteY = y; }, { passive: true });
 
 // ---------------------------------------------------------------- Aktionen
 async function aufgabeAktion(id, akt) {
@@ -532,10 +910,10 @@ async function aufgabeAktion(id, akt) {
     toast("Weg. Ähnliches künftig ausblenden?", [["Ja", async () => { await schreiben((q) => q.from("ignorierregeln").insert({ feld: "quelle", muster, grund: `Nicht relevant: ${a.titel.slice(0, 80)}` }), `«${muster}» wird ausgeblendet.`); laden(); }], zurueck], 7000);
   } else toast(akt === "erledigt" ? "Erledigt. Danke!" : "Ausgeblendet.", [zurueck]);
 }
-async function entscheidAntwort(id, antwort) {
+async function entscheidAntwort(id, antwort, kommentar = null) {
   const f = (S.d.entscheide || []).find((x) => x.id === id); if (!f) return;
   f.antwort = antwort; render();
-  const r = await schreiben((q) => q.from("freigaben").update({ antwort }).eq("id", id));
+  const r = await schreiben((q) => q.from("freigaben").update(kommentar ? { antwort, kommentar } : { antwort }).eq("id", id));
   if (r.error) { f.antwort = null; render(); return; }
   toast(`«${antwort}» gespeichert. Der Manager setzt es um.`, [["Rückgängig", async () => { await schreiben((q) => q.from("freigaben").update({ antwort: null }).eq("id", id)); laden(); }]]);
 }

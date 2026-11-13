@@ -1,6 +1,6 @@
 /* Service Worker Cockpit: App-Hülle offline, Daten kommen aus der App (localStorage). */
-const VERSION = "cockpit-1.2.1";
-const HUELLE = ["./", "index.html", "style.css?v=4", "app.js?v=4", "vendor/supabase.js", "manifest.webmanifest", "icons/icon-192.png", "icons/apple-touch-icon.png"];
+const VERSION = "cockpit-1.3.0";
+const HUELLE = ["./", "index.html", "style.css?v=5", "app.js?v=5", "vendor/supabase.js", "manifest.webmanifest", "icons/icon-192.png", "icons/apple-touch-icon.png"];
 self.addEventListener("install", (e) => { e.waitUntil(caches.open(VERSION).then((c) => c.addAll(HUELLE)).then(() => self.skipWaiting())); });
 self.addEventListener("activate", (e) => {
   e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== VERSION).map((k) => caches.delete(k)))).then(() => self.clients.claim()));
