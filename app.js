@@ -4,7 +4,7 @@
 const CFG = {
   url: "https://nnfrnhyitpbrbpjnmgfp.supabase.co",
   key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5uZnJuaHlpdHBicmJwam5tZ2ZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ1NDAxODMsImV4cCI6MjExMDExNjE4M30.z8W82Iud-IjFmLd-Eu-nQHA_sSNrvP7Ti0nDpeOWZe0",
-  version: "1.3.2",
+  version: "1.3.3",
 };
 const TEST = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) && new URLSearchParams(location.search).has("test");
 const $ = (s, el = document) => el.querySelector(s);
@@ -101,6 +101,11 @@ const ABFRAGEN = () => {
     trades: (q) => q.from("depot_trades").select("*").order("datum", { ascending: false }).limit(12),
     chancen: (q) => q.from("chancen").select("*").or(`gueltig_bis.is.null,gueltig_bis.gte.${h}`).order("relevanz", { ascending: false }).order("datum", { ascending: false }).limit(40),
     system: (q) => q.rpc("cockpit_system"),
+    steuerregeln: (q) => q.from("steuer_regeln").select("*"),
+    steuerposten: (q) => q.from("steuer_posten").select("*").order("frist", { ascending: true, nullsFirst: false }),
+    steuerauto: (q) => q.from("v_steuer_auto").select("*"),
+    wscheck: (q) => q.from("v_wertschriften_check").select("*"),
+    strategie: (q) => q.from("anlage_strategie").select("*"),
     kurse: (q) => q.from("kurse").select("*").order("pruefung", { ascending: true, nullsFirst: false }),
     abgaben: (q) => q.from("uni_abgaben").select("*").order("frist"),
     ma: (q) => q.from("aufgaben").select("id,titel,frist,status").ilike("titel", "Frist: MA-Meilenstein%").order("frist"),
@@ -635,6 +640,107 @@ function systemKarte() {
   return h;
 }
 
+// ---------------------------------------------------------------- Steuern (jährliche Akte, sammelt im Jahr, zeigt Hebel)
+const chf0 = (v) => (v == null || !isFinite(v) ? "–" : "CHF " + nf0.format(Math.round(v)));
+const zahlChf = (v) => (v == null || !isFinite(v) ? "–" : `${nf0.format(Math.round(v))}<small> CHF</small>`);
+function steuerRegel(k, ebene = "alle", jahr = new Date().getFullYear()) {
+  const r = (S.d?.steuerregeln || []).find((x) => x.jahr === jahr && x.ebene === ebene && x.schluessel === k);
+  return r && r.wert != null ? +r.wert : null;
+}
+function steuerKarte() {
+  const d = S.d || {}, jahr = new Date().getFullYear();
+  if (!(d.steuerposten || []).length && !(d.steuerregeln || []).length) return "";
+  const auto = (k) => +((d.steuerauto || []).find((a) => a.jahr === jahr && a.kategorie === k)?.betrag || 0);
+  const gs = steuerRegel("grenzsteuersatz") ?? 0.22, gs2 = steuerRegel("grenzsteuersatz", "alle", jahr + 1) ?? gs;
+  const p = (d.steuerposten || []).filter((x) => x.jahr === jahr);
+  const belege = p.filter((x) => x.art === "beleg"), da = belege.filter((x) => x.status !== "offen").length;
+  const mass = p.filter((x) => x.art !== "beleg" && x.status === "offen").sort((a, z) => new Date(a.frist || 8e15) - new Date(z.frist || 8e15));
+  const max3a = steuerRegel("3a_max"), ein3a = auto("Säule 3a"), luecke = max3a ? Math.max(0, max3a - ein3a) : 0;
+  const wb = auto("Weiterbildung"), wbMax = steuerRegel("weiterbildung_max", "bund");
+  const mob = auto("Mobilität"), fMax = steuerRegel("fahrkosten_max", "bl");
+  const erkl = (d.meilensteine || []).find((m) => /steuererklärung/i.test(m.titel || "") && m.status !== "erledigt");
+  let h = sek(`Steuern ${jahr}`, `<span class="chip">Grenzsteuersatz ~${pct(gs)}</span>`) + zeileKpi([
+    { name: "3a offen", wert: luecke ? zahlChf(luecke) : "voll", cls: luecke ? "warnt" : "gut", sub: luecke ? `spart ~${chf0(luecke * gs)} bis 31.12.` : "Maximum erreicht" },
+    { name: "Abzüge erfasst", wert: zahlChf(Math.min(wb, wbMax || wb) + ein3a), sub: `wirkt ~${chf0((Math.min(wb, wbMax || wb) + ein3a) * gs)}` },
+    { name: "Belege", wert: `${da}<small>/${belege.length}</small>`, sub: erkl?.datum ? `Erklärung bis ${datumKurz(erkl.datum)} ${new Date(erkl.datum).getFullYear()}` : "für die Erklärung" },
+  ]);
+  const hebel = [
+    { name: "Säule 3a", wert: ein3a, max: max3a, text: `${chf0(ein3a)} / ${chf0(max3a)}`, info: luecke ? `Lücke ${chf0(luecke)}: bis 31.12. einzahlen spart ~${chf0(luecke * gs)}; als Nachzahlung ab ${jahr + 1} (bei vollem Jahresbeitrag) ~${chf0(luecke * gs2)}` : "voll ausgeschöpft" },
+    { name: "Aus- und Weiterbildung", wert: wb, max: wbMax, text: `${chf0(wb)} / ${chf0(wbMax)}`, info: `HSG, CMA, Bücher, Reisen nach St. Gallen; abziehbar dank Lehre als erstem Abschluss. Wirkt ~${chf0(Math.min(wb, wbMax || wb) * gs)}` },
+    { name: "Mobilität (bezahlt)", wert: mob, max: fMax, text: `${chf0(mob)} / ${chf0(fMax)}`, info: `Abziehbar ist nur der Arbeitsweg (BL höchstens ${chf0(fMax)}, Bund ${chf0(steuerRegel("fahrkosten_max", "bund"))}); Fahrten zur HSG zählen zur Weiterbildung` },
+  ];
+  h += `<div class="karte">${hebel.map((x) => `<div class="hebel"><div class="reihe"><div class="l"><div class="titel" style="font-weight:600">${esc(x.name)}</div></div><div class="r meta">${x.text}</div></div>
+      ${meter([{ name: "", wert: x.max ? Math.min(1, x.wert / x.max) : 0, text: "", farbe: "var(--s3)" }], { max: 1 })}<div class="klein muted">${esc(x.info)}</div></div>`).join("")}
+    <div class="klein muted" style="margin-top:8px">Aus den Buchungen (Stand ${datumKurz(datenStand().buchungen || new Date())}). Grenzsteuersatz ist eine Schätzung (${pct(gs)} ${jahr}, ${pct(gs2)} ab ${jahr + 1}) und wird mit dem neuen Lohn kalibriert.</div></div>`;
+  if (mass.length) h += `<div class="karte liste-karte"><ul class="liste">${mass.map((m) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(m.titel)}</div>
+      ${m.notiz ? `<details class="details" data-k="st-${m.id}"${offen("st-" + m.id)}><summary>Varianten und Wirkung</summary>${esc(m.notiz)}</details>` : ""}</div>
+      <div class="r">${m.frist ? `<div class="meta ${tageBis(m.frist) <= 21 ? "warnt" : ""}">bis ${datumKurz(m.frist)}</div>` : ""}${m.wirkung_chf ? `<span class="chip gruen">~${chf0(m.wirkung_chf)}</span>` : ""}</div></div></li>`).join("")}</ul></div>`;
+  h += `<div class="karte"><details class="details" data-k="st-belege"${offen("st-belege")}><summary>Belege für die Erklärung ${jahr}: ${da} von ${belege.length} da</summary>
+    ${belege.map((b) => `<div class="check tippbar ${b.status !== "offen" ? "fertig" : ""}" data-beleg="${b.id}"><span class="b"></span><span>${esc(b.titel)}${b.beleg ? ` · ${beleg(b.beleg)}` : ""}</span></div>`).join("")}
+    <div class="klein muted" style="margin-top:6px">Antippen = vorhanden. Der Manager hakt ab, sobald er einen Beleg in Mails oder Downloads findet.</div></details></div>`;
+  return h;
+}
+async function belegUmschalten(id) {
+  const b = (S.d?.steuerposten || []).find((x) => x.id === id); if (!b) return;
+  const neu = b.status === "offen" ? "vorhanden" : "offen";
+  const r = await schreiben((q) => q.from("steuer_posten").update({ status: neu, geaendert: new Date().toISOString() }).eq("id", id), neu === "vorhanden" ? "Beleg abgehakt" : "Wieder offen");
+  if (!r.error) { b.status = neu; render(); }
+}
+
+// ---------------------------------------------------------------- Anlage-Kompass: Regeln, steuerfreier Privatanleger, Vermögen
+const strat = (k) => { const r = (S.d?.strategie || []).find((x) => x.schluessel === k); return r ? r.wert : null; };
+function kompassKarte() {
+  const d = S.d || {}, pos = d.depot || [];
+  if (!pos.length) return "";
+  const nichtCfd = pos.filter((p) => !/cfd/i.test(p.art || "")), cfd = pos.filter((p) => /cfd/i.test(p.art || ""));
+  const ws = nichtCfd.reduce((s, p) => s + +p.wert_chf, 0) || 1;
+  const kern = nichtCfd.filter((p) => p.topf === "kern").reduce((s, p) => s + +p.wert_chf, 0);
+  const trading = pos.filter((p) => p.topf !== "kern").reduce((s, p) => s + +p.wert_chf, 0);
+  const topf = strat("trading_topf"), kl = +(strat("klumpen_max") ?? 0.15);
+  const gross = nichtCfd.filter((p) => p.topf !== "kern").map((p) => ({ p, a: +p.wert_chf / ws })).filter((x) => x.a > kl).sort((a, z) => z.a - a.a);
+  const w = (d.wscheck || [])[0] || d.wscheck || {};
+  const faktor = +(w.volumen_faktor ?? 0), maxF = steuerRegel("safe_volumen_faktor") ?? 5;
+  const krit = [
+    { ok: !(+w.verkaeufe_unter_12m), name: `Haltedauer ≥ ${steuerRegel("safe_haltedauer_monate") ?? 12} Monate`, ist: `${+w.verkaeufe_unter_12m || 0} Verkäufe früher` },
+    { ok: faktor <= maxF, name: `Volumen ≤ ${maxF}× Bestand`, ist: `${String(faktor).replace(".", ",")}×` },
+    { ok: !(+w.cfd_positionen), name: "Derivate nur zur Absicherung", ist: `${+w.cfd_positionen || 0} CFD offen` },
+    { ok: !(+w.cfd_positionen), name: "Kein Hebel auf Kredit", ist: +w.cfd_positionen ? "CFD = Marge" : "keiner" },
+    { ok: null, name: "Gewinne < 50 % der Einkünfte", ist: "klein im Verhältnis zum Lohn" },
+  ];
+  const verletzt = krit.filter((k) => k.ok === false).length;
+  const regeln = [
+    { ok: true, name: "Kern", ist: `${pct(kern / ws)} der Wertschriften` },
+    { ok: topf ? trading >= topf.start * 0.5 : null, name: "Trading-Topf", ist: topf ? `${chf0(trading)} von ${chf0(topf.start)} (${trading >= topf.start ? "+" : MINUS}${pct(Math.abs(trading / topf.start - 1))})` : chf0(trading) },
+    { ok: !gross.length, name: `Klumpen > ${pct(kl)}`, ist: gross.length ? gross.map((x) => `${x.p.symbol.split(":")[0]} ${pct(x.a)}`).join(", ") : "keiner" },
+    { ok: cfd.length <= 4, name: "CFD offen", ist: `${cfd.length} · Engagement ${chf0(cfd.reduce((s, p) => s + Math.abs(+p.engagement_chf || 0), 0))}` },
+  ];
+  const zeile = (r) => `<div class="regel"><span class="ampel ${r.ok === true ? "gut" : r.ok === false ? "schlecht" : ""}"></span><span class="n">${esc(r.name)}</span><span class="i">${esc(r.ist)}</span></div>`;
+  return sek("Anlage-Kompass") + `<div class="karte">${regeln.map(zeile).join("")}</div>` +
+    sek("Steuerfreie Kursgewinne", verletzt ? `<span class="chip gelb">${verletzt} nicht erfüllt</span>` : `<span class="chip gruen">erfüllt</span>`) +
+    `<div class="karte">${krit.map(zeile).join("")}<div class="klein muted" style="margin-top:8px">Safe-Haven-Kriterien der ESTV (KS 36). Sind alle erfüllt, gilt der Handel sicher als privat und Kursgewinne bleiben steuerfrei. Fehlt eines, wird der Einzelfall beurteilt: bei grösserem Trading-Topf droht Einkommenssteuer plus AHV auf Gewinne.${verletzt ? " Hebel: CFD und kurze Haltedauer betreffen nur den Trading-Topf; der Kern ist unproblematisch." : ""}</div></div>`;
+}
+function vermoegenKarte() {
+  const d = S.d || {}, pos = d.depot || [];
+  const start = pos.reduce((s, p) => s + +p.wert_chf, 0) + +((d.depotverlauf || []).slice(-1)[0]?.cash_chf || 0);
+  const sz = strat("rendite_szenarien") || { vorsichtig: 0.03, basis: 0.06, gut: 0.09 };
+  const rate = S.vmRate ?? Math.round((+(strat("sparrate_quartal") ?? 2000)) / 3), r = S.vmRendite ?? sz.basis;
+  return sek("Vermögen in Zukunft") + `<div class="karte"><div class="vm-regler">
+    <label><span>Sparrate <b id="vm-rate-w">${chf0(rate)}</b> pro Monat</span><input type="range" id="vm-rate" min="0" max="4000" step="50" value="${rate}"></label>
+    <label><span>Rendite <b id="vm-r-w">${pct(r, 1)}</b> pro Jahr</span><input type="range" id="vm-r" min="0" max="0.12" step="0.005" value="${r}"></label></div>
+    <div id="vm-erg">${vmErgebnis(start, rate, r)}</div>
+    <div class="klein muted" style="margin-top:8px">Start: Depot heute ${chf0(start)} (ohne 3a und Pensionskasse). Nominal, vor Steuern und Inflation. Szenarien aus der Strategie: ${pct(sz.vorsichtig)} / ${pct(sz.basis)} / ${pct(sz.gut)}.</div></div>`;
+}
+function vmWert(start, rate, r, jahre) { const m = r / 12, n = jahre * 12; return start * Math.pow(1 + m, n) + (m ? rate * (Math.pow(1 + m, n) - 1) / m : rate * n); }
+function vmErgebnis(start, rate, r) {
+  return zeileKpi([5, 10, 20].map((j) => { const v = vmWert(start, rate, r, j), ein = start + rate * 12 * j; return { name: `in ${j} Jahren`, wert: `${nf0.format(Math.round(v / 1000))}<small>k CHF</small>`, sub: `davon Ertrag ${chf0(v - ein)}` }; }));
+}
+function vmBinden() {
+  const d = S.d || {}, start = (d.depot || []).reduce((s, p) => s + +p.wert_chf, 0) + +((d.depotverlauf || []).slice(-1)[0]?.cash_chf || 0);
+  const a = $("#vm-rate"), b = $("#vm-r"); if (!a || !b) return;
+  const neu = () => { S.vmRate = +a.value; S.vmRendite = +b.value; $("#vm-rate-w").textContent = chf0(S.vmRate); $("#vm-r-w").textContent = pct(S.vmRendite, 1); $("#vm-erg").innerHTML = vmErgebnis(start, S.vmRate, S.vmRendite); };
+  a.oninput = neu; b.oninput = neu;
+}
+
 // ---------------------------------------------------------------- Jobs
 const EING = ["eingereicht", "assessment", "interview", "angebot", "abgesagt"];
 const statusName = (s) => ({ entdeckt: "entdeckt", dossier_bereit: "Dossier bereit", freigegeben: "freigegeben", eingereicht: "eingereicht", assessment: "Test", interview: "Interview", angebot: "Angebot", abgesagt: "Absage", geschlossen: "geschlossen" }[s] || s);
@@ -741,7 +847,7 @@ function seiteGeld() {
   const phasen = minusPhasen(prog), unter = prog.filter((p) => +p.saldo < 0).length;
   const fmt = (x) => (x == null ? "–" : chf(x).replace("-", MINUS));
   let h = hero({ label: "Privatkonto", einheit: "CHF", wert: fmt(saldo ? +saldo.saldo : null), cls: saldo && +saldo.saldo < 0 ? "schlecht" : "",
-    sub: `${standChip(ds.saldo, 7, "Saldo")}${standChip(ds.buchungen, 35, "Buchungen")}` });
+    sub: `${standChip(ds.saldo, 35, "Saldo")}${standChip(ds.buchungen, 35, "Buchungen")}` });
   h += `<div class="karte"><div class="karte-kopf"><span>Kontostand · Prognose ${prog.length} Tage</span></div><div class="chart" id="c-prognose"></div>
     ${phasen.length ? `<div class="phasen">${phasen.map((p) => `<span class="chip rot">${datumKurz(p.von)}${p.bis ? "–" + datumKurz(p.bis) : " und weiter"}</span>`).join("")}</div>` : ""}
     <div class="klein muted">Rote Fläche = Konto im Minus. Annahmen und Fixposten aus der Liquiditätsplanung.</div></div>`;
@@ -765,6 +871,7 @@ function seiteGeld() {
   const katFarbe = Object.fromEntries(katItems.map((k, i) => [k.name, KAT_FARBE[i % 8]]));
   h += sek("Letzte Ausgaben") + `<div class="karte">${Object.entries(tage).map(([t, xs]) => `<div class="tag">${datumKurz(t)}<span class="muted" data-privat> · ${chf(-xs.reduce((s, x) => s + +x.betrag, 0))}</span></div>
     ${xs.map((x) => `<div class="reihe buch"><div class="l"><span class="kp" style="--c:${katFarbe[x.kategorie] || "var(--text-3)"}"></span>${esc(haendler(x.text))}<span class="meta"> · ${esc(x.kategorie || "Unklar")}${x.konto === "kreditkarte" ? " · Karte" : ""}</span></div><div class="r" data-privat>${chf(-x.betrag, 2)}</div></div>`).join("")}`).join("") || '<div class="leer">Keine Buchungen der letzten 45 Tage.</div>'}</div>`;
+  h += steuerKarte();
   return h;
 }
 function chartsGeld() {
@@ -825,6 +932,8 @@ function seiteDepot() {
   h += sek("Depotwert") + `<div class="karte"><div class="chart" id="c-depot"></div></div>`;
   const ch = (S.d?.chancen || []).filter((c) => c.quelle !== "karriere");
   const art = { termin: ["Termin", "blau"], signal: ["Signal", "gruen"], idee: ["Idee", ""], risiko: ["Risiko", "rot"] };
+  h += kompassKarte();
+  h += vermoegenKarte();
   h += sek("Chancen-Radar", ch.length) + `<div class="karte liste-karte">${ch.length ? `<ul class="liste">${ch.map((c) => `<li><div class="titel">${esc(c.titel)}</div><div class="meta"><span class="chip ${art[c.art]?.[1] || ""}">${art[c.art]?.[0] || c.art}</span>${c.symbol ? `<span class="chip">${esc(c.symbol)}</span>` : ""}${c.gueltig_bis ? "bis " + datumKurz(c.gueltig_bis) : ""}</div>${c.text ? `<details class="details" data-k="ch-${c.id}"${offen("ch-" + c.id)}><summary>Warum</summary>${esc(c.text)}</details>` : ""}</li>`).join("")}</ul>` : '<div class="leer">Der Manager füllt das Radar beim nächsten Lauf.</div>'}</div>`;
   const tr = S.d?.trades || [];
   h += sek("Letzte Trades", tr.length) + `<div class="karte liste-karte"><ul class="liste">${tr.map((t) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(t.richtung)} ${esc(t.name || t.symbol)}</div><div class="meta">${datumKurz(t.datum)}${t.menge ? " · " + nf0.format(t.menge) + " Stk." : ""}</div></div><div class="r" data-privat>${chf(Math.abs(+t.betrag_chf || 0))}</div></div></li>`).join("")}</ul></div>`;
@@ -937,7 +1046,7 @@ function kopf(titel) {
   const sync = S.d?.sync || [], ds = datenStand();
   const alt = (q, std) => { const x = sync.find((s) => s.quelle === q); return !x ? "fehler" : !x.ok ? "fehler" : (Date.now() - new Date(x.zuletzt)) / 36e5 > std ? "alt" : ""; };
   const z = [alt("speicher", 1)];
-  if (S.tab === "geld") z.push(ds.saldo && tageSeit(ds.saldo) > 7 ? "alt" : "");
+  if (S.tab === "geld") z.push(ds.saldo && tageSeit(ds.saldo) > 35 ? "alt" : "");
   if (S.tab === "depot") z.push(ds.depot && tageSeit(ds.depot) > 4 ? "alt" : "");
   const schlecht = z.includes("fehler") ? "fehler" : z.includes("alt") ? "alt" : "";
   let unter = `${S.offline ? "offline · " : ""}Stand ${S.geladen ? alter(S.geladen) : "–"}`;
@@ -947,7 +1056,7 @@ function kopf(titel) {
 }
 function syncBlatt() {
   const sync = S.d?.sync || [], ds = datenStand();
-  blatt(`<h3>Datenstand</h3><div class="meta" style="margin-bottom:8px">${standChip(ds.saldo, 7, "Saldo")}${standChip(ds.buchungen, 35, "Buchungen")}${standChip(ds.depot, 4, "Saxo")}</div>
+  blatt(`<h3>Datenstand</h3><div class="meta" style="margin-bottom:8px">${standChip(ds.saldo, 35, "Saldo")}${standChip(ds.buchungen, 35, "Buchungen")}${standChip(ds.depot, 4, "Saxo")}</div>
     <ul class="liste">${sync.sort((a, b) => a.quelle.localeCompare(b.quelle)).map((x) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500"><span class="punkt ${x.ok ? "" : "fehler"}"></span> ${esc(x.quelle)}</div><div class="meta">${esc(x.meldung || "")}</div></div><div class="r meta">${alter(x.zuletzt)}</div></div></li>`).join("")}</ul>
     <div class="hinweis">Lange auf eine Zahl drücken blendet alle Beträge aus (Privatsphäre).</div>`);
 }
@@ -985,6 +1094,8 @@ function binden() {
   $$(".aufgabe .haken[data-akt]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); const li = b.closest(".aufgabe"); li.classList.add("weg"); setTimeout(() => aufgabeAktion(li.dataset.id, "erledigt"), 160); });
   $$(".aufgabe").forEach(wischen);
   $$("[data-oeffne]").forEach((x) => x.onclick = () => aufgabeBlatt(x.dataset.oeffne));
+  $$("[data-beleg]").forEach((x) => x.onclick = () => belegUmschalten(x.dataset.beleg));
+  vmBinden();
   $$(".entscheid [data-antwort]").forEach((b) => b.onclick = () => { const k = b.closest(".entscheid"); entscheidAntwort(k.dataset.id, b.dataset.antwort, $(".kommentar", k)?.value.trim() || null); });
   $$("[data-ms-akt]").forEach((b) => b.onclick = () => meilenstein(b.closest("[data-ms]").dataset.ms, b.dataset.msAkt));
   $$("[data-privat]").forEach((x) => {
