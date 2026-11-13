@@ -4,7 +4,7 @@
 const CFG = {
   url: "https://nnfrnhyitpbrbpjnmgfp.supabase.co",
   key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5uZnJuaHlpdHBicmJwam5tZ2ZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ1NDAxODMsImV4cCI6MjExMDExNjE4M30.z8W82Iud-IjFmLd-Eu-nQHA_sSNrvP7Ti0nDpeOWZe0",
-  version: "1.3.1",
+  version: "1.3.2",
 };
 const TEST = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) && new URLSearchParams(location.search).has("test");
 const $ = (s, el = document) => el.querySelector(s);
@@ -99,7 +99,8 @@ const ABFRAGEN = () => {
     depotverlauf: (q) => q.from("depot_verlauf").select("*").order("datum"),
     instrumente: (q) => q.from("depot_instrumente").select("symbol,hebel"),
     trades: (q) => q.from("depot_trades").select("*").order("datum", { ascending: false }).limit(12),
-    chancen: (q) => q.from("chancen").select("*").or(`gueltig_bis.is.null,gueltig_bis.gte.${h}`).order("relevanz", { ascending: false }).order("datum", { ascending: false }).limit(20),
+    chancen: (q) => q.from("chancen").select("*").or(`gueltig_bis.is.null,gueltig_bis.gte.${h}`).order("relevanz", { ascending: false }).order("datum", { ascending: false }).limit(40),
+    system: (q) => q.rpc("cockpit_system"),
     kurse: (q) => q.from("kurse").select("*").order("pruefung", { ascending: true, nullsFirst: false }),
     abgaben: (q) => q.from("uni_abgaben").select("*").order("frist"),
     ma: (q) => q.from("aufgaben").select("id,titel,frist,status").ilike("titel", "Frist: MA-Meilenstein%").order("frist"),
@@ -418,6 +419,7 @@ function seiteHeute() {
   h += sek("Deine Aufgaben", auf.length, `<button class="alle" id="b-filter2">Ausgeblendet</button>`);
   h += `<div class="karte liste-karte">${auf.length ? `<ul class="liste">${sicht.map(aufgabeZeile).join("")}</ul>` : `<div class="leer gross">Alles erledigt ✓</div>`}
     ${auf.length > 6 ? `<button class="knopf mehrzeigen" id="mehr">${S.mehr ? "Weniger zeigen" : `Alle ${auf.length} zeigen`}</button>` : ""}<div class="wischhinweis">Nach rechts wischen = erledigt · nach links = später</div></div>`;
+  h += lastKarte();
   h += wocheKarte();
   if (erledigt.length || (d.manager || []).length) {
     const lauf = (d.manager || []).filter((m) => m.status !== "erledigt" && !/^pre-mortem/i.test(m.titel));
@@ -527,6 +529,112 @@ function terminArt(t) {
 }
 const terminFarbe = (t) => ({ job: "var(--s1)", uni: "var(--s3)", block: "var(--s7)", privat: "var(--s4)" }[terminArt(t)]);
 
+// ---------------------------------------------------------------- Kapazität: nutzbare Zeit vs. fällige Arbeit (14 Tage)
+const AKTIV = ["offen", "wartet", "in_arbeit"];
+const NUTZBAR = 0.5; // Anteil der freien Zeit, der realistisch für Aufgaben bleibt
+const std = (m) => String(Math.round(m / 6) / 10).replace(".", ",");
+function kapazitaet(n = 14) {
+  const d = S.d || {}, jetzt = new Date(), tage = [];
+  for (let i = 0; i < n; i++) {
+    const tg = plusTage(i), k = isoTag(tg), wt = tg.getDay(), bis = 21 * 60 + 30;
+    const von = i === 0 ? Math.max(8 * 60, jetzt.getHours() * 60 + jetzt.getMinutes()) : 8 * 60;
+    const belegt = wt >= 1 && wt <= 3 ? [[8 * 60, 17 * 60 + 30]] : []; // E+H inkl. Weg
+    (d.termine || []).filter((t) => !t.ganztags && !istBlock(t) && isoTag(t.start) === k).forEach((t) => {
+      const a = new Date(t.start), z = new Date(t.ende || +a + 36e5);
+      belegt.push([a.getHours() * 60 + a.getMinutes(), isoTag(z) === k ? z.getHours() * 60 + z.getMinutes() : 24 * 60]);
+    });
+    belegt.sort((x, y) => x[0] - y[0]);
+    let frei = 0, c = von;
+    for (const [a, z] of belegt) { if (a > c) frei += Math.max(0, Math.min(a, bis) - c); c = Math.max(c, z); if (c >= bis) break; }
+    if (c < bis) frei += bis - c;
+    tage.push({ tg, k, frei: Math.max(0, frei), nutz: Math.max(0, frei) * NUTZBAR, last: 0, posten: [] });
+  }
+  let geschaetzt = 0, ueberfaellig = 0;
+  (d.aufgaben || []).filter((a) => a.frist && AKTIV.includes(a.status)).forEach((a) => {
+    const f = isoTag(a.frist); if (f > tage[n - 1].k) return;
+    const i = f < tage[0].k ? 0 : tage.findIndex((x) => x.k === f); if (i < 0) return;
+    if (f < tage[0].k) ueberfaellig++;
+    const m = +a.minuten || 30; if (!+a.minuten) geschaetzt++;
+    tage[i].last += m; tage[i].posten.push({ a, m });
+  });
+  let kn = 0, kl = 0, engpass = null;
+  tage.forEach((t, i) => { kn += t.nutz; kl += t.last; t.kn = kn; t.kl = kl; if (!engpass && i > 0 && kl > kn + 1) engpass = t; }); // heute nicht werten (Abend, Überfälliges)
+  return { tage, engpass, geschaetzt, ueberfaellig, last: kl, nutz: kn };
+}
+const tagKurz = (tg, i) => (i === 0 ? "Heute" : i === 1 ? "Morgen" : `${TAGE[tg.getDay()]} ${tg.getDate()}.${tg.getMonth() + 1}.`);
+function lastKarte() {
+  const k = kapazitaet();
+  if (!k.last) return "";
+  const e = k.engpass, ei = e ? k.tage.indexOf(e) : -1;
+  const brocken = (e ? k.tage.slice(0, ei + 1) : k.tage).flatMap((t) => t.posten).sort((a, z) => z.m - a.m).slice(0, 3);
+  const satz = e
+    ? `Bis ${tagKurz(e.tg, ei)} sind <b>${std(e.kl)} h</b> fällig, realistisch nutzbar sind ${std(e.kn)} h. Es fehlen <b>${std(e.kl - e.kn)} h</b>: heute mit dem grössten Brocken anfangen oder eine Frist verschieben.`
+    : `In 14 Tagen sind <b>${std(k.last)} h</b> fällig, nutzbar sind rund ${std(k.nutz)} h (${pct(k.last / Math.max(1, k.nutz))} ausgelastet).`;
+  return sek("Zeit für deine Aufgaben", e ? `<span class="chip rot">Engpass ${tagKurz(e.tg, ei)}</span>` : `<span class="chip gruen">passt</span>`) +
+    `<div class="karte"><div class="details" style="margin-top:0">${satz}</div><div class="chart" id="c-last"></div>
+    ${brocken.length ? `<ul class="liste" style="margin-top:4px">${brocken.map(({ a, m }) => `<li class="tippbar" data-oeffne="${a.id}"><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(a.titel)}</div><div class="meta">${fristText(a.frist, a.frist_mit_zeit)}</div></div><div class="r"><span class="chip">${m} Min.</span></div></div></li>`).join("")}</ul>` : ""}
+    <div class="klein muted" style="margin-top:6px">Balken = fällige Arbeit je Tag (nach Frist), Linie = nutzbare Zeit (Hälfte der freien Zeit ausserhalb E+H und Terminen, 08–21:30).${k.geschaetzt ? ` ${k.geschaetzt} Aufgabe${k.geschaetzt > 1 ? "n" : ""} ohne Zeitangabe mit 30 Min. gerechnet.` : ""}${k.ueberfaellig ? ` ${k.ueberfaellig} überfällige zählen auf heute.` : ""}</div></div>`;
+}
+function chartsHeute() {
+  const k = kapazitaet(); if (!k.last) return;
+  balken("c-last", { labels: k.tage.map((t, i) => (i === 0 ? "heute" : `${TAGE[t.tg.getDay()].slice(0, 2)} ${t.tg.getDate()}.`)),
+    serien: [{ name: "Fällige Arbeit", farbe: "var(--s4)", werte: k.tage.map((t) => t.last / 60) }],
+    linieSerie: { name: "Nutzbare Zeit", farbe: "var(--s3)", werte: k.tage.map((t) => t.nutz / 60) }, fmt: (v) => std(v * 60) + " h", hoehe: 150,
+    aria: `Fällige Arbeit und nutzbare Zeit je Tag, 14 Tage${k.engpass ? ", Engpass erkannt" : ""}` });
+}
+
+// ---------------------------------------------------------------- Jobs: Wege zum Jobstart + Bewerbungsfenster
+const STUFE = { angebot: 0, interview: 1, assessment: 2 };
+const startDatum = (s) => { const m = String(s || "").match(/Start\s*(?:am\s*)?(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})/i); return m ? new Date(+m[3], +m[2] - 1, +m[1]) : null; };
+function naechsterSchritt(x) {
+  const fw = (x.firma || "").split(/\s+/)[0].toLowerCase();
+  const woerter = stelleTeile(x.stelle)[0].toLowerCase().split(/[^a-zäöü&]+/).filter((w) => w.length > 4 && !/graduate|program|talent|zürich|zuerich|university/.test(w));
+  return (S.d?.aufgaben || []).filter((a) => AKTIV.includes(a.status)).map((a) => {
+    const t = a.titel.toLowerCase();
+    const andere = (a.titel.match(/\bB-\d+/g) || []).filter((b) => b !== x.nr).length; // Sammelaufgaben mit mehreren Bewerbungen nachrangig
+    const p = (x.nr && new RegExp(`\\b${x.nr}\\b`).test(a.titel) ? 5 : 0) + (fw.length >= 2 && t.includes(fw) ? 1 : 0) + woerter.filter((w) => t.includes(w)).length - 2 * andere;
+    return { a, p };
+  }).filter((r) => r.p >= 2 || (r.p === 1 && !woerter.length)).sort((r, z) => z.p - r.p || new Date(r.a.frist || 8e15) - new Date(z.a.frist || 8e15))[0]?.a;
+}
+const kurzTitel = (t, n = 64) => { const x = String(t).replace(/\s*[–-]?\s*bis\s+(mo|di|mi|do|fr|sa|so)\.?\s*\d{1,2}\.\d{1,2}\.?(\s*\d{1,2}:\d{2})?\s*$/i, "").trim(); return x.length > n ? x.slice(0, x.lastIndexOf(" ", n)) + " …" : x; };
+function wegeKarte() {
+  const d = S.d || {}, wege = (d.bewerbungen || []).filter((x) => x.status in STUFE).sort((a, z) => STUFE[a.status] - STUFE[z.status]);
+  const kf = (d.meilensteine || []).find((m) => /kündigungsfrist/i.test(m.titel || ""));
+  const starts = wege.map((x) => ({ x, s: startDatum(x.stelle) })).filter((y) => y.s).sort((a, z) => a.s - z.s);
+  const chip = { angebot: ["Angebot", "gruen"], interview: ["Gespräch", "gruen"], assessment: ["Test", "lila"] };
+  let fuss = starts.length ? `Frühester bekannter Start: <b>${datumKurz(starts[0].s)} ${starts[0].s.getFullYear()}</b> (${esc(starts[0].x.firma || "")}). ` : "";
+  if (kf && kf.status !== "erledigt") fuss += `Davon abhängig: <b>Kündigungsfrist E+H</b> noch nicht geklärt${kf.datum ? ` (Ziel ${datumKurz(kf.datum)})` : ""}.`;
+  return sek("Wege zum Jobstart", wege.length) + `<div class="karte liste-karte"><ul class="liste">${wege.map((x) => {
+    const [titel] = stelleTeile(x.stelle), s = naechsterSchritt(x), st = startDatum(x.stelle);
+    return `<li${s ? ` class="tippbar" data-oeffne="${s.id}"` : ""}><div class="reihe mit-mono">${mono(x.firma)}<div class="l"><div class="titel">${esc(titel.replace(/\s*\(Start[^)]*\)/i, ""))}</div>
+      <div class="meta">${s ? `<span class="${s.frist && tageBis(s.frist) <= 2 ? "warnt" : ""}">Nächster Schritt: ${esc(kurzTitel(s.titel))}${s.frist ? " · " + fristText(s.frist, s.frist_mit_zeit) : ""}</span>` : '<span class="muted">Kein nächster Schritt erfasst</span>'}</div></div>
+      <div class="r"><span class="chip ${chip[x.status][1]}">${chip[x.status][0]}</span>${st ? `<div class="meta">Start ${datumKurz(st)}</div>` : ""}</div></div></li>`;
+  }).join("") || '<li class="leer">Noch kein Test, Gespräch oder Angebot.</li>'}</ul>${fuss ? `<div class="klein muted" style="padding:8px 2px 2px">${fuss}</div>` : ""}</div>`;
+}
+function fensterKarte() {
+  const fen = (S.d?.chancen || []).filter((c) => c.quelle === "karriere").sort((a, z) => new Date(a.datum || 8e15) - new Date(z.datum || 8e15));
+  return sek("Bewerbungsfenster", fen.length) + `<div class="karte liste-karte"><ul class="liste">${fen.map((c) => `<li><div class="reihe mit-mono">${mono(c.symbol || c.titel)}<div class="l"><div class="titel">${esc(c.titel)}</div>${c.text ? `<div class="meta">${esc(c.text)}</div>` : ""}</div>
+    <div class="r">${c.datum ? `<div class="meta ${tageBis(c.datum) <= 7 ? "warnt" : ""}">bis ${datumKurz(c.datum)}</div>` : ""}</div></div></li>`).join("") || '<li class="leer">Wird am Montag und Donnerstag vom Redakteur gefüllt: Programme und Einstiegsstellen mit bestätigter Bewerbungsfrist.</li>'}</ul></div>`;
+}
+
+// ---------------------------------------------------------------- Plan: Wert und Zustand des Managers
+function systemKarte() {
+  const s = S.d?.system; if (!s || Array.isArray(s)) return "";
+  const l = s.laeufe || [], n = l.reduce((a, x) => a + x.n, 0), ok = l.reduce((a, x) => a + x.ok, 0), fe = l.reduce((a, x) => a + x.fehler, 0);
+  const stunden = ((+s.minuten_30 || 0) + 45 * (+s.bewerbungen_30 || 0)) / 60;
+  const prob = l.filter((x) => x.fehler || x.teilweise);
+  let h = sek("Dein Manager", "30 Tage") + zeileKpi([
+    { name: "Für dich erledigt", wert: nf0.format(s.erledigt_30 || 0), sub: `${nf0.format(s.bewerbungen_30 || 0)} Bewerbungen eingereicht` },
+    { name: "Gesparte Zeit", wert: `~${nf0.format(stunden)}<small> h</small>`, sub: "Schätzung: Aufgaben-Minuten + 45 Min. je Bewerbung" },
+    { name: "Läufe ok (7 T)", wert: pct(ok / Math.max(1, n)), cls: ok / Math.max(1, n) < 0.9 ? "schlecht" : fe ? "" : "gut", sub: `${nf0.format(n)} Läufe · ${fe} Fehler` },
+  ]);
+  if (prob.length) h += `<div class="karte liste-karte"><ul class="liste">${prob.slice(0, 6).map((x) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(x.routine)}</div>${x.letzte_meldung ? `<div class="meta">${esc(x.letzte_meldung)}</div>` : ""}</div>
+    <div class="r">${x.fehler ? `<span class="chip rot">${x.fehler} Fehler</span>` : ""}${x.teilweise ? `<span class="chip gelb">${x.teilweise} teilweise</span>` : ""}<div class="meta">${x.ok}/${x.n} ok</div></div></div></li>`).join("")}</ul>
+    <div class="klein muted" style="padding:6px 2px 2px">Läufe der letzten 7 Tage mit Fehlern oder Lücken. Der Manager behebt sie; bleibt etwas hängen, erscheint es oben unter «Manager braucht dich».</div></div>`;
+  if (s.kanal_fehlt && s.eingereicht && s.kanal_fehlt / s.eingereicht > 0.3) h += `<div class="banner klein">Datenlücke: Bei ${s.kanal_fehlt} von ${s.eingereicht} Bewerbungen fehlt der Kanal. Neue Bewerbungen werden ab jetzt mit Kanal und Link erfasst.</div>`;
+  return h;
+}
+
 // ---------------------------------------------------------------- Jobs
 const EING = ["eingereicht", "assessment", "interview", "angebot", "abgesagt"];
 const statusName = (s) => ({ entdeckt: "entdeckt", dossier_bereit: "Dossier bereit", freigegeben: "freigegeben", eingereicht: "eingereicht", assessment: "Test", interview: "Interview", angebot: "Angebot", abgesagt: "Absage", geschlossen: "geschlossen" }[s] || s);
@@ -552,6 +660,7 @@ function seiteJobs() {
     { name: "Gesprächsquote", wert: pct(reif.filter(gespr).length / Math.max(1, reif.length)), sub: `ab 21 T · n=${reif.length}` },
   ]);
   h += einschaetzungKarte("jobs");
+  h += wegeKarte();
   const stufen = [["Eingereicht", eing.length], ["Antwort", eing.filter(antw).length], ["Test oder Gespräch", eing.filter(test).length], ["Gespräch", eing.filter(gespr).length], ["Angebot", eing.filter((x) => x.angebot_am || x.status === "angebot").length]];
   const farbT = ["#86b6ef", "#5e9be6", "#3a7fd9", "#2563b8", "#104281"];
   h += sek("Trichter") + `<div class="karte">${meter(stufen.map(([n, v], i) => ({ name: esc(n), wert: v, text: `${nf0.format(v)}${i ? ` <span class="muted">· ${pct(v / Math.max(1, stufen[i - 1][1]))}</span>` : ""}`, farbe: farbT[i] })), { max: Math.max(1, eing.length) })}
@@ -562,9 +671,9 @@ function seiteJobs() {
   h += sek("Warten auf Antwort", wartend.length) + `<div class="karte">${segment(alt.map((x) => ({ ...x, text: String(x.wert) })))}
     ${wartend.filter((x) => tageSeit(x.eingereicht_am) > 21).length ? `<div class="klein muted">Über 21 Tage ohne Antwort: ${wartend.filter((x) => tageSeit(x.eingereicht_am) > 21).map((x) => esc(x.firma || "")).join(", ")}</div>` : ""}</div>`;
   const bereit = b.filter((x) => ["dossier_bereit", "freigegeben"].includes(x.status));
-  const lauf = [...aktivGespr, ...tests, ...bereit, ...wartend.sort((a, z) => (z.eingereicht_am || "").localeCompare(a.eingereicht_am || ""))];
+  const lauf = [...bereit, ...wartend.sort((a, z) => (z.eingereicht_am || "").localeCompare(a.eingereicht_am || ""))];
   const jobTermine = (S.d?.termine || []).filter((t) => new Date(t.ende || t.start) >= new Date());
-  h += sek("Läuft gerade", lauf.length) + `<div class="karte liste-karte"><ul class="liste">${lauf.slice(0, S.alleBew ? 99 : 8).map((x) => {
+  h += sek("Eingereicht und bereit", lauf.length) + `<div class="karte liste-karte"><ul class="liste">${lauf.slice(0, S.alleBew ? 99 : 8).map((x) => {
     const [titel, ref] = stelleTeile(x.stelle);
     const fw = (x.firma || "").split(/\s+/)[0].toLowerCase();
     const termin = fw.length >= 2 ? jobTermine.find((t) => t.titel.toLowerCase().includes(fw) && /interview|gespräch|assessment|call/i.test(t.titel)) : null;
@@ -577,11 +686,12 @@ function seiteJobs() {
     return `<li><div class="reihe mit-mono">${mono(x.firma)}<div class="l"><div class="titel">${esc(titel)}</div><div class="meta">${esc(x.firma || "")}${x.ort ? " · " + esc(x.ort) : ""}${ref ? ` · <span class="muted">${esc(ref)}</span>` : ""}</div></div><div class="r">${rechts}</div></div></li>`;
   }).join("") || '<li class="leer">Nichts in Arbeit.</li>'}</ul>${lauf.length > 8 ? `<button class="knopf mehrzeigen" id="alle-bew">${S.alleBew ? "Weniger" : `Alle ${lauf.length} zeigen`}</button>` : ""}</div>`;
   const erf = S.d?.erfolg || [], dim = S.jobDim || "Rollentyp";
-  const dims = ["Rollentyp", "Vorlage", "Kanal"].filter((x) => erf.some((e) => e.dimension === x));
+  const dims = ["Rollentyp", "Vorlage", "Kanal"].filter((x) => { const r = erf.filter((e) => e.dimension === x), tot = r.reduce((a, e) => a + +e.n, 0); return tot && r.filter((e) => e.wert === "unbekannt").reduce((a, e) => a + +e.n, 0) / tot < 0.5; });
   const rows = erf.filter((e) => e.dimension === dim).map((r) => ({ ...r, nn: r.n_reif ?? r.n, ii: r.interviews_reif ?? r.interviews })).sort((a, z) => z.nn - a.nn);
   h += sek("Wo es klappt") + `<div class="karte"><div class="seg-schalter">${dims.map((x) => `<button class="${x === dim ? "an" : ""}" data-dim="${x}">${x}</button>`).join("")}</div>
     ${meter(rows.map((r) => ({ name: esc(r.wert), wert: r.ii / Math.max(1, r.nn), text: `${r.ii}/${r.nn} · ${pct(r.ii / Math.max(1, r.nn))}`, blass: r.nn < 5, farbe: "var(--s3)" })), { max: Math.max(0.25, ...rows.map((r) => r.ii / Math.max(1, r.nn))) })}
     <div class="klein muted" style="margin-top:6px">Balken = Gesprächsquote${rows.some((r) => r.n_reif != null) ? " der Bewerbungen ab 21 Tagen" : ""}. Unter 5 Fällen blass: noch keine Aussage.${dim === "Vorlage" ? " Vorlage nach Einreichedatum: v1 bis 8.11., v2 ab 9.11., v3 ab 12.11." : ""}</div></div>`;
+  h += fensterKarte();
   h += terminKarte(jobTermine.filter((t) => terminArt(t) === "job"), "Job-Termine");
   const zu = b.filter((x) => ["abgesagt", "geschlossen"].includes(x.status)).slice(0, 12);
   h += sek("Abgeschlossen") + `<div class="karte"><details class="details" data-k="job-zu"${offen("job-zu")}><summary>${b.filter((x) => x.status === "abgesagt").length} Absagen, ${b.filter((x) => x.status === "geschlossen").length} geschlossen</summary>
@@ -713,7 +823,7 @@ function seiteDepot() {
   })), { max: Math.max(1, ...z.pos.map((p) => (p.art === "CFD" ? Math.abs(+p.engagement_chf) : +p.wert_chf))) })}
     <div class="klein muted">Balken = Wert (CFD: Engagement als Umriss). Rechts G/V seit Kauf.</div></div>`;
   h += sek("Depotwert") + `<div class="karte"><div class="chart" id="c-depot"></div></div>`;
-  const ch = S.d?.chancen || [];
+  const ch = (S.d?.chancen || []).filter((c) => c.quelle !== "karriere");
   const art = { termin: ["Termin", "blau"], signal: ["Signal", "gruen"], idee: ["Idee", ""], risiko: ["Risiko", "rot"] };
   h += sek("Chancen-Radar", ch.length) + `<div class="karte liste-karte">${ch.length ? `<ul class="liste">${ch.map((c) => `<li><div class="titel">${esc(c.titel)}</div><div class="meta"><span class="chip ${art[c.art]?.[1] || ""}">${art[c.art]?.[0] || c.art}</span>${c.symbol ? `<span class="chip">${esc(c.symbol)}</span>` : ""}${c.gueltig_bis ? "bis " + datumKurz(c.gueltig_bis) : ""}</div>${c.text ? `<details class="details" data-k="ch-${c.id}"${offen("ch-" + c.id)}><summary>Warum</summary>${esc(c.text)}</details>` : ""}</li>`).join("")}</ul>` : '<div class="leer">Der Manager füllt das Radar beim nächsten Lauf.</div>'}</div>`;
   const tr = S.d?.trades || [];
@@ -801,6 +911,7 @@ function seitePlan() {
   ms.forEach((m) => { const j = m.datum ? new Date(m.datum).getFullYear() : (m.zeitraum?.match(/20\d\d/)?.[0] || "offen"); (jahre[j] ||= []).push(m); });
   h += sek("Zeitstrahl") + `<div class="karte"><div class="zeitstrahl">${Object.keys(jahre).sort().map((j) => `<div class="jahr">${j}</div>${jahre[j].sort((a, b) => new Date(a.datum || 8e15) - new Date(b.datum || 8e15)).map((m) => `<div class="ms ${m.status === "erledigt" ? "erledigt" : ""} ${wartetJob(m) ? "hohl" : ""}" style="--c:${BEREICH_FARBE[m.bereich] || "var(--accent)"}"><div class="titel" style="font-weight:500">${esc(m.titel)}</div><div class="meta"><span class="chip">${esc(m.bereich)}</span>${wartetJob(m) ? "wartet auf Jobstart" : m.zeitraum ? esc(m.zeitraum) : m.datum ? datumKurz(m.datum) : ""}${m.status !== "geplant" ? ` · ${esc(m.status)}` : ""}</div></div>`).join("")}`).join("") || '<div class="leer">Noch leer.</div>'}</div>
     <div class="legende" style="margin-top:12px">${Object.entries(BEREICH_FARBE).filter(([b]) => ms.some((m) => m.bereich === b)).map(([b, f]) => `<span style="--c:${f}">${b}</span>`).join("")}</div></div>`;
+  h += systemKarte();
   return h;
 }
 function chartsPlan() {
@@ -853,7 +964,7 @@ function render() {
     <nav class="tabs" role="tablist">${TABS.map(([k, n]) => `<button role="tab" aria-selected="${k === key && !sp}" class="${k === key && !sp ? "an" : ""}" data-tab="${k}">${IC[k]}<span>${n}</span></button>`).join("")}</nav>`;
   const rk = sp ? "sp:" + S.sp.art + (S.sp.id || "") : key;
   if (render.letzterTab === rk) window.scrollTo(0, y); render.letzterTab = rk;
-  if (!sp) ({ jobs: chartsJobs, geld: chartsGeld, depot: chartsDepot, uni: chartsUni, plan: chartsPlan }[key] || (() => {}))();
+  if (!sp) ({ heute: chartsHeute, jobs: chartsJobs, geld: chartsGeld, depot: chartsDepot, uni: chartsUni, plan: chartsPlan }[key] || (() => {}))();
   binden();
 }
 function binden() {
