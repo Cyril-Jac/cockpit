@@ -4,7 +4,7 @@
 const CFG = {
   url: "https://nnfrnhyitpbrbpjnmgfp.supabase.co",
   key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5uZnJuaHlpdHBicmJwam5tZ2ZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ1NDAxODMsImV4cCI6MjExMDExNjE4M30.z8W82Iud-IjFmLd-Eu-nQHA_sSNrvP7Ti0nDpeOWZe0",
-  version: "1.3.0",
+  version: "1.3.1",
 };
 const TEST = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) && new URLSearchParams(location.search).has("test");
 const $ = (s, el = document) => el.querySelector(s);
@@ -86,7 +86,7 @@ const ABFRAGEN = () => {
     entscheide: (q) => q.from("freigaben").select("*").eq("status", "offen").in("typ", ["Entscheid", "Bewerbung"]).order("frist", { ascending: true, nullsFirst: false }),
     termine: (q) => q.from("termine").select("*").gte("start", gestern).lte("start", in60).order("start"),
     einschaetzung: (q) => q.from("v_einschaetzung").select("*"),
-    bewerbungen: (q) => q.from("bewerbungen").select("id,nr,stelle,firma,ort,status,kanal,fit,ats,eingereicht_am,frist,link,rollentyp,vorlage,geaendert").order("geaendert", { ascending: false }),
+    bewerbungen: (q) => q.from("bewerbungen").select("id,nr,stelle,firma,ort,status,kanal,fit,ats,eingereicht_am,frist,link,rollentyp,vorlage,geaendert,antwort_am,test_am,interview_am,angebot_am,absage_am").order("geaendert", { ascending: false }),
     erfolg: (q) => q.from("v_jobs_erfolg").select("*"),
     wochen: (q) => q.from("v_jobs_wochen").select("*"),
     finanzmonat: (q) => q.from("v_finanz_monat").select("*").gte("monat", vor400),
