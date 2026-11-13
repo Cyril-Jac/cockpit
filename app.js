@@ -808,13 +808,18 @@ function spBinden() {
   if (s) s.oninput = () => { S.spSuche = s.value; clearTimeout(spBinden.t); spBinden.t = setTimeout(() => { render(); const n = $("#sp-suche"); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }, 250); };
   $$("[data-sf]").forEach((b) => b.onclick = () => { S.spStatus = { ...(S.spStatus || {}), [S.sp.id]: b.dataset.sf }; render(); });
 }
-function spRoute() {
+async function spRoute() {
   const h = location.hash;
   if (!h.startsWith("#s/")) { if (S.sp) { S.sp = null; render(); } return; }
   const rest = h.slice(3);
   if (!rest) return spOeffnen("start");
-  if (rest.startsWith("q/")) { const id = hexId(rest.slice(2)); if (id) { S.spSuche = ""; spOeffnen("quelle", id); } return; }
-  const id = hexId(rest); if (id) spOeffnen("seite", id);
+  const istQ = rest.startsWith("q/"), roh = (istQ ? rest.slice(2) : rest).split("?")[0];
+  const id = hexId(roh); if (!id) return;
+  // Alte Notion-Links zeigen oft auf die Datenbank-ID statt auf die Datenquelle: beide auflösen.
+  if (!SPD.quellen) await spLaden("start");
+  const q = (SPD.quellen || []).find((x) => x.id === id || x.datenbank_id === id);
+  if (q || istQ) { S.spSuche = ""; return spOeffnen("quelle", q ? q.id : id); }
+  spOeffnen("seite", id);
 }
 window.addEventListener("hashchange", spRoute);
 
