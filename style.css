@@ -216,7 +216,10 @@ textarea:focus, input:focus { border-color: var(--accent); }
 .login .logo { width: 72px; height: 72px; border-radius: 18px; margin: 0 auto 16px; display: block; }
 .login h1 { font-size: 26px; margin: 0 0 6px; }
 .login p { color: var(--text-2); margin: 0 0 20px; }
-.login input { text-align: center; font-size: 28px; letter-spacing: .3em; font-variant-numeric: tabular-nums; }
+.login input { width: 100%; border: 1px solid var(--line); border-radius: 12px; padding: 12px; background: var(--surface); font-size: 17px; text-align: center; outline: none; margin-bottom: 8px; }
+.login input:focus { border-color: var(--accent); }
+.login #code { font-size: 28px; letter-spacing: .3em; font-variant-numeric: tabular-nums; }
+.login #einr-code { letter-spacing: .15em; text-transform: uppercase; }
 .login .knopf { width: 100%; justify-content: center; margin-top: 12px; min-height: 48px; font-size: 16px; }
 .hinweis { font-size: 13px; color: var(--text-3); margin-top: 14px; }
 .fehlertext { color: var(--crit-ink); font-size: 14px; margin-top: 10px; min-height: 20px; }

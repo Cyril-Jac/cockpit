@@ -4,7 +4,7 @@
 const CFG = {
   url: "https://nnfrnhyitpbrbpjnmgfp.supabase.co",
   key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5uZnJuaHlpdHBicmJwam5tZ2ZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ1NDAxODMsImV4cCI6MjExMDExNjE4M30.z8W82Iud-IjFmLd-Eu-nQHA_sSNrvP7Ti0nDpeOWZe0",
-  version: "1.0.0",
+  version: "1.1.0",
 };
 const TEST = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) && new URLSearchParams(location.search).has("test");
 const $ = (s, el = document) => el.querySelector(s);
@@ -568,36 +568,73 @@ function ignorierBlatt() {
 }
 
 // ---------------------------------------------------------------- Login
-function loginSeite(fehler = "") {
+function loginSeite(fehler = "", modus = "") {
+  const email = speicher.get("cockpit-email") || "";
+  modus = modus || (speicher.get("cockpit-eingerichtet") ? "login" : "einrichten");
   $("#app").innerHTML = `<div class="login"><div class="box"><img class="logo" src="icons/icon-192.png" alt=""><h1>Cockpit</h1>
-    <p>Der Code kommt als Push aufs Handy (ntfy).</p>
-    <div id="schritt1"><button class="knopf primaer" id="b-code">Code aufs Handy schicken</button></div>
-    <div id="schritt2" style="display:none"><input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="······"><button class="knopf primaer" id="b-login">Anmelden</button></div>
+    ${modus === "login" ? `<p>Anmelden. Auf dem iPhone füllt der Schlüsselbund alles aus.</p>
+      <form id="f-login" autocomplete="on"><input type="email" id="email" name="email" autocomplete="username" placeholder="E-Mail" value="${esc(email)}">
+      <input type="password" id="pw" name="password" autocomplete="current-password" placeholder="Passwort">
+      <button class="knopf primaer" type="submit" id="b-login">Anmelden</button></form>
+      <div class="hinweis"><a href="#" id="l-einrichten">Erstmals einrichten oder Passwort neu setzen</a></div>`
+    : modus === "einrichten" ? `<p>Einmalig: Einrichtungscode vom Manager eingeben und ein eigenes Passwort wählen. Das iPhone schlägt ein sicheres vor und merkt es sich.</p>
+      <form id="f-einr" autocomplete="on"><input type="email" id="email" name="email" autocomplete="username" placeholder="E-Mail (deine Proton-Adresse)" value="${esc(email)}">
+      <input id="einr-code" placeholder="Einrichtungscode" autocomplete="off" autocapitalize="characters">
+      <input type="password" id="pw" name="new-password" autocomplete="new-password" placeholder="Neues Passwort (mind. 10 Zeichen)">
+      <button class="knopf primaer" type="submit" id="b-einr">Einrichten und anmelden</button></form>
+      <div class="hinweis"><a href="#" id="l-login">Ich habe schon ein Passwort</a></div>`
+    : `<p>Der Code kommt als Push aufs Handy (ntfy).</p>
+      <div id="schritt1"><button class="knopf primaer" id="b-code">Code aufs Handy schicken</button></div>
+      <div id="schritt2" style="display:none"><input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="······"><button class="knopf primaer" id="b-otp">Anmelden</button></div>
+      <div class="hinweis"><a href="#" id="l-login">Mit Passwort anmelden</a></div>`}
     <div class="fehlertext" id="fehler">${esc(fehler)}</div><div class="hinweis">Privat. Du bleibst danach angemeldet.</div></div></div>`;
-  const zeig2 = () => { $("#schritt1").style.display = "none"; $("#schritt2").style.display = "block"; setTimeout(() => $("#code").focus(), 100); };
-  $("#b-code").onclick = async () => {
-    $("#b-code").disabled = true; $("#fehler").textContent = "";
+  const f = (t) => { $("#fehler").textContent = t; };
+  const link = (id, m) => { const l = $(id); if (l) l.onclick = (e) => { e.preventDefault(); loginSeite("", m); }; };
+  link("#l-einrichten", "einrichten"); link("#l-login", "login"); link("#l-push", "push");
+  const anmelden = async (mail, pw) => {
+    const { error } = await sb.auth.signInWithPassword({ email: mail, password: pw });
+    if (error) { f(error.message.includes("Invalid") ? "E-Mail oder Passwort stimmt nicht." : error.message); return false; }
+    speicher.set("cockpit-email", mail); speicher.set("cockpit-eingerichtet", true); start(); return true;
+  };
+  const fl = $("#f-login");
+  if (fl) fl.onsubmit = async (e) => { e.preventDefault(); $("#b-login").disabled = true; if (!(await anmelden($("#email").value.trim(), $("#pw").value))) $("#b-login").disabled = false; };
+  const fe = $("#f-einr");
+  if (fe) fe.onsubmit = async (e) => {
+    e.preventDefault(); f(""); $("#b-einr").disabled = true;
     try {
-      const r = await fetch(`${CFG.url}/functions/v1/cockpit/login-code`, { method: "POST", headers: { "Content-Type": "application/json", apikey: CFG.key } });
+      const r = await fetch(`${CFG.url}/functions/v1/cockpit/zugang`, { method: "POST", headers: { "Content-Type": "application/json", apikey: CFG.key },
+        body: JSON.stringify({ code: $("#einr-code").value.trim(), passwort: $("#pw").value }) });
       const j = await r.json();
       if (!j.ok) throw new Error(j.fehler || "Fehler");
-      speicher.set("cockpit-email", j.email);
-      zeig2();
-    } catch (e) { $("#fehler").textContent = e.message; $("#b-code").disabled = false; }
+      const mail = $("#email").value.trim() || j.email;
+      if (mail.toLowerCase() !== String(j.email).toLowerCase()) throw new Error("Diese E-Mail gehört nicht zum Cockpit.");
+      await anmelden(j.email, $("#pw").value);
+    } catch (err) { f(err.message); $("#b-einr").disabled = false; }
   };
-  const login = async () => {
-    const code = $("#code").value.replace(/\D/g, "");
-    if (code.length !== 6) { $("#fehler").textContent = "Bitte 6 Ziffern."; return; }
-    $("#b-login").disabled = true;
-    const email = speicher.get("cockpit-email");
-    if (!email) { $("#fehler").textContent = "Bitte zuerst einen Code anfordern."; $("#b-login").disabled = false; return; }
-    let { error } = await sb.auth.verifyOtp({ email, token: code, type: "email" });
-    if (error) ({ error } = await sb.auth.verifyOtp({ email, token: code, type: "magiclink" }));
-    if (error) { $("#fehler").textContent = "Code stimmt nicht oder ist abgelaufen."; $("#b-login").disabled = false; return; }
-    start();
-  };
-  $("#b-login").onclick = login;
-  $("#code").addEventListener("input", (e) => { if (e.target.value.replace(/\D/g, "").length === 6) login(); });
+  const bc = $("#b-code");
+  if (bc) {
+    bc.onclick = async () => {
+      bc.disabled = true; f("");
+      try {
+        const r = await fetch(`${CFG.url}/functions/v1/cockpit/login-code`, { method: "POST", headers: { "Content-Type": "application/json", apikey: CFG.key } });
+        const j = await r.json();
+        if (!j.ok) throw new Error(j.fehler || "Fehler");
+        speicher.set("cockpit-email", j.email);
+        $("#schritt1").style.display = "none"; $("#schritt2").style.display = "block"; setTimeout(() => $("#code").focus(), 100);
+      } catch (e) { f(e.message); bc.disabled = false; }
+    };
+    const otp = async () => {
+      const code = $("#code").value.replace(/\D/g, ""), email = speicher.get("cockpit-email");
+      if (code.length !== 6 || !email) { f("Bitte 6 Ziffern."); return; }
+      $("#b-otp").disabled = true;
+      let { error } = await sb.auth.verifyOtp({ email, token: code, type: "email" });
+      if (error) ({ error } = await sb.auth.verifyOtp({ email, token: code, type: "magiclink" }));
+      if (error) { f("Code stimmt nicht oder ist abgelaufen."); $("#b-otp").disabled = false; return; }
+      start();
+    };
+    $("#b-otp").onclick = otp;
+    $("#code").addEventListener("input", (e) => { if (e.target.value.replace(/\D/g, "").length === 6) otp(); });
+  }
 }
 
 async function start() {
