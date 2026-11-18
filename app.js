@@ -86,7 +86,7 @@ const ABFRAGEN = () => {
     entscheide: (q) => q.from("freigaben").select("*").eq("status", "offen").in("typ", ["Entscheid", "Bewerbung"]).order("frist", { ascending: true, nullsFirst: false }),
     termine: (q) => q.from("termine").select("*").gte("start", gestern).lte("start", in60).order("start"),
     einschaetzung: (q) => q.from("v_einschaetzung").select("*"),
-    bewerbungen: (q) => q.from("bewerbungen").select("id,nr,stelle,firma,ort,status,kanal,fit,ats,eingereicht_am,frist,link,rollentyp,vorlage,geaendert,antwort_am,test_am,interview_am,angebot_am,absage_am").order("geaendert", { ascending: false }),
+    bewerbungen: (q) => q.from("bewerbungen").select("id,nr,stelle,firma,ort,status,kanal,fit,ats,eingereicht_am,frist,link,rollentyp,vorlage,geaendert,antwort_am,test_am,interview_am,angebot_am,absage_am,notion_id,erstellt").order("geaendert", { ascending: false }),
     erfolg: (q) => q.from("v_jobs_erfolg").select("*"),
     wochen: (q) => q.from("v_jobs_wochen").select("*"),
     finanzmonat: (q) => q.from("v_finanz_monat").select("*").gte("monat", vor400),
@@ -622,6 +622,22 @@ function wegeKarte() {
       <div class="r"><span class="chip ${chip[x.status][1]}">${chip[x.status][0]}</span>${st ? `<div class="meta">Start ${datumKurz(st)}</div>` : ""}</div></div></li>`;
   }).join("") || '<li class="leer">Noch kein Test, Gespräch oder Angebot.</li>'}</ul>${fuss ? `<div class="klein muted" style="padding:8px 2px 2px">${fuss}</div>` : ""}</div>`;
 }
+// Neu gefunden: Treffer des Karriere-Laufs (Status «entdeckt»), bis 18.11.2026 nirgends sichtbar
+const fitChip = (f) => { const n = parseFloat(f); return isNaN(n) ? "" : `<span class="chip ${n >= 80 ? "gruen" : n >= 70 ? "blau" : "gelb"}">Fit ${n}</span>`; };
+const ortKurz = (o) => String(o || "").split(/[,(]/)[0].trim();
+function neuKarte() {
+  const neu = (S.d?.bewerbungen || []).filter((x) => x.status === "entdeckt")
+    .sort((a, z) => (parseFloat(z.fit) || 0) - (parseFloat(a.fit) || 0) || new Date(z.erstellt || 0) - new Date(a.erstellt || 0));
+  const wann = (d) => { const t = tageSeit(d); return t <= 0 ? "heute" : t === 1 ? "gestern" : `vor ${t} T`; };
+  return sek("Neu gefunden", neu.length) + `<div class="karte liste-karte"><ul class="liste">${neu.map((x) => {
+    const [titel] = stelleTeile(x.stelle), sp = x.notion_id ? `#s/${String(x.notion_id).replace(/-/g, "")}` : "";
+    const kurz = kurzTitel(titel.replace(/\s*\([^)]*\)/g, "").replace(/\s{2,}/g, " ").trim(), 60);
+    return `<li${sp ? ` class="tippbar" data-sp="${esc(sp)}"` : ""}><div class="reihe mit-mono">${mono(x.firma)}<div class="l"><div class="titel">${esc(kurz)}</div>
+      <div class="meta">${esc(x.firma || "")}${ortKurz(x.ort) ? " · " + esc(ortKurz(x.ort)) : ""}${x.erstellt ? ` · <span class="muted">${wann(x.erstellt)} gefunden</span>` : ""}</div></div>
+      <div class="r">${fitChip(x.fit)}${x.link ? `<div class="meta"><a ${linkAttr(x.link)}>Inserat ↗</a></div>` : ""}</div></div></li>`;
+  }).join("") || '<li class="leer">Der Karriere-Lauf sucht jede Nacht um 01:27. Neue Stellen über der Fit-Schwelle erscheinen hier.</li>'}</ul>
+  ${neu.length ? '<div class="klein muted" style="padding:8px 2px 2px">Tippen öffnet Fit-Begründung und Muss-Kriterien. Mit fertigem Dossier wandert die Stelle nach «Eingereicht und bereit».</div>' : ""}</div>`;
+}
 function fensterKarte() {
   const fen = (S.d?.chancen || []).filter((c) => c.quelle === "karriere").sort((a, z) => new Date(a.datum || 8e15) - new Date(z.datum || 8e15));
   return sek("Bewerbungsfenster", fen.length) + `<div class="karte liste-karte"><ul class="liste">${fen.map((c) => `<li><div class="reihe mit-mono">${mono(c.symbol || c.titel)}<div class="l"><div class="titel">${esc(c.titel)}</div>${c.text ? `<div class="meta">${esc(c.text)}</div>` : ""}</div>
@@ -830,6 +846,7 @@ function seiteJobs() {
     { name: "Antwortquote", wert: pct(reif.filter(antw).length / Math.max(1, reif.length)), sub: `ab 21 T · n=${reif.length}` },
     { name: "Gesprächsquote", wert: pct(reif.filter(gespr).length / Math.max(1, reif.length)), sub: `ab 21 T · n=${reif.length}` },
   ]);
+  h += neuKarte();
   h += einschaetzungKarte("jobs");
   h += wegeKarte();
   const stufen = [["Eingereicht", eing.length], ["Antwort", eing.filter(antw).length], ["Test oder Gespräch", eing.filter(test).length], ["Gespräch", eing.filter(gespr).length], ["Angebot", eing.filter((x) => x.angebot_am || x.status === "angebot").length]];
@@ -1160,6 +1177,7 @@ function binden() {
   $$(".aufgabe .haken[data-akt]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); const li = b.closest(".aufgabe"); li.classList.add("weg"); setTimeout(() => aufgabeAktion(li.dataset.id, "erledigt"), 160); });
   $$(".aufgabe").forEach(wischen);
   $$("[data-oeffne]").forEach((x) => x.onclick = () => aufgabeBlatt(x.dataset.oeffne));
+  $$("[data-sp]").forEach((x) => x.onclick = (e) => { if (!e.target.closest("a")) location.hash = x.dataset.sp; });
   $$("[data-gehe]").forEach((x) => x.onclick = () => { S.tab = x.dataset.gehe; speicher.set("cockpit-tab", S.tab); window.scrollTo(0, 0); render(); });
   $$("[data-beleg]").forEach((x) => x.onclick = () => belegUmschalten(x.dataset.beleg));
   $$("[data-newsf]").forEach((x) => x.onclick = () => { S.newsFilter = x.dataset.newsf; render(); });
