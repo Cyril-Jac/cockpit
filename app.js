@@ -4,7 +4,7 @@
 const CFG = {
   url: "https://nnfrnhyitpbrbpjnmgfp.supabase.co",
   key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5uZnJuaHlpdHBicmJwam5tZ2ZwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTQ1NDAxODMsImV4cCI6MjExMDExNjE4M30.z8W82Iud-IjFmLd-Eu-nQHA_sSNrvP7Ti0nDpeOWZe0",
-  version: "1.3.4",
+  version: "1.4.0",
 };
 const TEST = /^(localhost|127\.0\.0\.1)$/.test(location.hostname) && new URLSearchParams(location.search).has("test");
 const $ = (s, el = document) => el.querySelector(s);
@@ -117,6 +117,9 @@ const ABFRAGEN = () => {
     ignorier: (q) => q.from("ignorierregeln").select("*").order("erstellt", { ascending: false }),
     sync: (q) => q.from("sync_status").select("*"),
     eingaben: (q) => q.from("eingaben").select("*").order("erstellt", { ascending: false }).limit(8),
+    push: (q) => q.from("push_log").select("id,erstellt,quelle,klasse,status,titel,grund,frist,refs,gesendet_am,beantwortet_am,antwort")
+      .neq("status", "test").gte("erstellt", new Date(Date.now() - 28 * 864e5).toISOString()).order("erstellt", { ascending: false }).limit(300),
+    fraufgaben: (q) => q.from("freigaben").select("id,ziel").eq("status", "offen").eq("typ", "Aufgabe"),
   };
 };
 
@@ -390,54 +393,92 @@ function rang(a) {
   return a.wichtig >= 3 ? 4 : 5;
 }
 const sortiereAufgaben = (liste) => [...liste].sort((a, b) => rang(a) - rang(b) || (a.frist ? +new Date(a.frist) : 9e15) - (b.frist ? +new Date(b.frist) : 9e15));
+// ---------------------------------------------------------------- Für dich: ein Eingang (Push-Weiche, VR 19.11.2026)
+// Alles, was Cyril tun oder entscheiden muss, an einem Ort, nach Frist sortiert. Jeder Push führt auf genau eine Zeile.
+const FD_ART = { entscheid: ["Entscheid", "blau"], bewerbung: ["Bewerbung", "lila"], bitte: ["Manager braucht dich", "gelb"], aufgabe: ["Aufgabe", ""], news: ["Depot", "gruen"] };
+function fuerDich() {
+  const d = S.d || {}, out = [];
+  (d.entscheide || []).filter((f) => !f.antwort).forEach((f) => out.push({ art: f.typ === "Bewerbung" ? "bewerbung" : "entscheid", id: f.id, titel: ohneCode(f.frage), frist: f.frist }));
+  sortiereAufgaben(d.aufgaben || []).forEach((a) => {
+    if (istManagerBitte(a)) out.push({ art: "bitte", id: a.id, titel: a.titel.replace(/^\s*(für den manager|freischalten)\s*:?\s*/i, ""), frist: a.frist, minuten: a.minuten, mitZeit: a.frist_mit_zeit });
+    else if (rang(a) <= 3) out.push({ art: "aufgabe", id: a.id, titel: a.titel, frist: a.frist, minuten: a.minuten, mitZeit: a.frist_mit_zeit });
+  });
+  (d.news || []).filter((n) => n.status === "neu" && n.relevanz === 3 && Date.now() - new Date(n.erstellt) < 2 * 864e5)
+    .forEach((n) => out.push({ art: "news", id: n.id, titel: `${n.firma || n.symbol || ""}: ${n.titel}` }));
+  return out.sort((x, y) => (x.frist ? +new Date(x.frist) : 9e15) - (y.frist ? +new Date(y.frist) : 9e15));
+}
 function heuteZahlen() {
-  const auf = S.d?.aufgaben || [], ende = new Date(heute()); ende.setDate(ende.getDate() + 1);
-  const faellig = auf.filter((a) => a.frist && new Date(a.frist) < ende && !istManagerBitte(a));
-  return { faellig: faellig.length, minuten: faellig.reduce((s, a) => s + (+a.minuten || 0), 0) };
+  const fd = fuerDich();
+  return { n: fd.length, minuten: fd.reduce((s, x) => s + (+x.minuten || 0), 0) };
+}
+function fdZeile(x) {
+  const [name, farbe] = FD_ART[x.art] || ["", ""];
+  const ueber = x.frist && new Date(x.frist) < new Date();
+  const knopf = x.art === "aufgabe" || x.art === "bitte"
+    ? `<span class="fd-knoepfe"><button class="fd-ok" data-fd-akt="erledigt" aria-label="Erledigt">${IC.ok}</button></span>` : "";
+  return `<li class="tippbar fd" data-fd="${x.art}:${x.id}"><div class="fd-in"><div class="meta"><span class="chip ${farbe}">${name}</span>${x.frist ? `<span class="${ueber ? "schlecht" : "warnt"}">${fristText(x.frist, x.mitZeit ?? true)}</span>` : ""}${x.minuten ? `<span>${x.minuten} Min.</span>` : ""}</div><b>${esc(x.titel)}</b></div>${knopf}</li>`;
+}
+function entscheidBlatt(id) {
+  const f = (S.d?.entscheide || []).find((x) => x.id === id || x.notion_id === id);
+  if (!f) { toast("Schon beantwortet."); return; }
+  const erl = f.erlaubt?.length ? f.erlaubt : ["Ja", "Nein", "Später"];
+  blatt(`<h3>${esc(ohneCode(f.frage))}</h3><div class="meta" style="margin:-6px 0 12px">${f.frist ? `<span class="chip ${new Date(f.frist) < new Date() ? "rot" : "blau"}">${fristText(f.frist, true)}</span>` : ""}<span class="chip">${esc(f.typ || "Entscheid")}</span></div>
+    ${f.kontext ? `<div class="details">${esc(f.kontext)}</div>` : ""}${f.link ? `<div class="details"><a ${linkAttr(f.link)}>Öffnen</a></div>` : ""}
+    <input type="text" class="fd-kommentar" id="ent-kom" placeholder="Kommentar (freiwillig)" maxlength="500">
+    <div class="knoepfe">${erl.map((a) => `<button class="knopf ${/^(ja|einreichen)$/i.test(a) ? "primaer" : ""}" data-antwort="${esc(a)}">${esc(a)}</button>`).join("")}</div>`, (b) => {
+    $$("[data-antwort]", b).forEach((k) => k.onclick = () => { const kom = $("#ent-kom", b)?.value.trim() || null; blattZu(); entscheidAntwort(f.id, k.dataset.antwort, kom); });
+  });
+}
+function erledigtKarte() {
+  const m = (S.d?.manager || []).filter((x) => !/^pre-mortem/i.test(x.titel));
+  if (!m.length) return "";
+  const erledigt = m.filter((x) => x.status === "erledigt"), lauf = m.filter((x) => x.status !== "erledigt");
+  return sek("Für dich erledigt", erledigt.length ? `${erledigt.length} in 7 T` : "") + `<div class="karte liste-karte"><ul class="liste">${erledigt.slice(0, 10).map((x) => `<li class="zeile-einfach"><span class="haken an">${IC.ok}</span><div><div class="titel">${esc(x.titel)}</div><div class="meta">${x.beleg ? beleg(x.beleg) : "ohne Beleg"} · ${alter(x.geaendert)}</div></div></li>`).join("") || '<li class="leer">Noch nichts diese Woche.</li>'}</ul>
+    ${lauf.length ? `<details class="details" data-k="mgr-lauf"${offen("mgr-lauf")}><summary>${lauf.length} in Arbeit beim Manager</summary><ul class="liste">${lauf.map((x) => `<li><div class="titel" style="font-weight:500">${esc(x.titel)}</div><div class="meta">${x.frist ? fristText(x.frist) : ""}</div></li>`).join("")}</ul></details>` : ""}</div>`;
+}
+// Pushes der Weiche (Tab 5 Jahre): was aufs Handy ging, was nicht und warum
+const PUSH_STATUS = { gesendet: ["gesendet", "gruen"], unterwegs: ["unterwegs", "blau"], wartet: ["geplant", "blau"], tagesmeldung: ["für 17:30", "gelb"],
+  in_tagesmeldung: ["in Tagesmeldung", ""], nur_cockpit: ["nur Cockpit", ""], doppelt: ["doppelt", ""], fehler: ["Fehler", "rot"] };
+function pushKarte() {
+  const p = Array.isArray(S.d?.push) ? S.d.push : [];
+  if (!p.length) return "";
+  const w7 = p.filter((x) => Date.now() - new Date(x.erstellt) < 7 * 864e5);
+  const raus = w7.filter((x) => ["gesendet", "unterwegs"].includes(x.status));
+  const mitBezug = p.filter((x) => x.status === "gesendet" && x.klasse === "sofort" && (x.refs || []).length);
+  const quote = mitBezug.length ? mitBezug.filter((x) => x.beantwortet_am).length / mitBezug.length : null;
+  const still = w7.filter((x) => ["nur_cockpit", "doppelt", "tagesmeldung", "in_tagesmeldung"].includes(x.status)).length;
+  let h = sek("Pushes", "7 Tage") + zeileKpi([
+    { name: "Aufs Handy", wert: nf0.format(raus.length), sub: (() => { const tm = raus.filter((x) => x.quelle === "weiche").length, an = raus.filter((x) => x.klasse === "antwort").length;
+      return `${raus.filter((x) => x.klasse === "sofort").length} sofort · ${tm} Tagesmeldung${tm === 1 ? "" : "en"} · ${an} Antwort${an === 1 ? "" : "en"}`; })() },
+    { name: "Nicht gepusht", wert: nf0.format(still), sub: "gesammelt, nur hier oder doppelt" },
+    { name: "Beantwortet", wert: quote == null ? "–" : pct(quote), sub: `Sofort-Pushes mit Knopf, 28 T (${mitBezug.length})` },
+  ]);
+  h += `<div class="karte liste-karte"><ul class="liste">${p.slice(0, 10).map((x) => `<li><div class="reihe"><div class="l"><div class="titel" style="font-weight:500">${esc(x.titel)}</div><div class="meta">${esc(x.quelle)} · ${esc(x.grund || "")}</div></div><div class="r"><span class="chip ${(PUSH_STATUS[x.status] || [])[1] || ""}">${esc((PUSH_STATUS[x.status] || [x.status])[0])}</span><div class="meta">${alter(x.erstellt)}</div></div></div></li>`).join("")}</ul>
+    <div class="klein muted" style="padding:6px 2px 2px">Ein Push kommt nur, wenn du in 24 h selbst handeln musst (höchstens 2 am Tag, nie 22–07 Uhr, Mo–Mi 08–17 nur bei Frist vor 18 Uhr). Alles andere sammelt die Tagesmeldung um 17:30 oder steht nur hier.</div></div>`;
+  return h;
 }
 
 function seiteHeute() {
   const d = S.d || {};
-  const alle = sortiereAufgaben(d.aufgaben || []);
-  const bitten = alle.filter(istManagerBitte), auf = alle.filter((a) => !istManagerBitte(a));
-  const ents = (d.entscheide || []).filter((f) => !f.antwort);
+  const fd = fuerDich();
+  const imFd = new Set(fd.filter((x) => x.art === "aufgabe" || x.art === "bitte").map((x) => x.id));
+  const auf = sortiereAufgaben(d.aufgaben || []).filter((a) => !imFd.has(a.id));
   const jetzt = new Date();
   const naechster = (d.termine || []).filter((t) => !t.ganztags && new Date(t.ende || t.start) > jetzt).sort((a, b) => new Date(a.start) - new Date(b.start))[0];
   const erledigt = (d.manager || []).filter((m) => m.status === "erledigt" && !/^pre-mortem/i.test(m.titel));
-  // Heute in 30 Sekunden
-  let h = `<section class="karte brief"><div class="brief-kopf">Heute in 30 Sekunden</div><ul class="brief-liste">`;
-  if (naechster) h += `<li><span class="ic">${IC.uhr}</span><div><b>${esc(terminTitel(naechster.titel))}</b><div class="meta">${datumKurz(naechster.start)} ${hhmm(naechster.start)} · ${bisText(naechster.start)}${naechster.ort ? " · " + esc(naechster.ort) : ""}</div></div></li>`;
-  auf.slice(0, 3).forEach((a, i) => { h += `<li class="tippbar" data-oeffne="${a.id}"><span class="nr">${i + 1}</span><div><b>${esc(a.titel)}</b><div class="meta">${a.frist ? fristText(a.frist, a.frist_mit_zeit) : "ohne Frist"}${a.minuten ? ` · ${a.minuten} Min.` : ""}</div></div></li>`; });
-  if (ents.length) { const fr = ents.filter((e) => e.frist).sort((a, b) => new Date(a.frist) - new Date(b.frist))[0];
-    h += `<li><span class="ic">${IC.filter}</span><div><b>${ents.length} Entscheid${ents.length > 1 ? "e" : ""} für dich</b><div class="meta">${fr ? "erster bis " + fristText(fr.frist, true) : "ohne Frist"} · unten wischen</div></div></li>`; }
-  if (bitten.length) h += `<li><span class="ic warn">!</span><div><b>Manager braucht dich: ${bitten.length}×</b><div class="meta">${bitten.slice(0, 2).map((a) => esc(a.titel.replace(/^\s*(für den manager|freischalten)\s*:?\s*/i, ""))).join(" · ")}</div></div></li>`;
-  const wichtig = (d.news || []).filter((n) => n.status === "neu" && n.relevanz === 3 && Date.now() - new Date(n.erstellt) < 2 * 864e5);
-  if (wichtig.length) h += `<li class="tippbar" data-gehe="depot"><span class="ic warn">!</span><div><b>Newsfilter: ${wichtig.length} wichtige Meldung${wichtig.length > 1 ? "en" : ""}</b><div class="meta">${esc((wichtig[0].firma || wichtig[0].symbol || "") + ": " + wichtig[0].titel).slice(0, 90)}</div></div></li>`;
-  if (erledigt.length) h += `<li><span class="ic gut">${IC.ok}</span><div><b>Für dich erledigt: ${erledigt.length} in 7 Tagen</b><div class="meta">${esc(erledigt[0].titel.slice(0, 70))}</div></div></li>`;
-  h += `</ul></section>`;
+  // Für dich: der eine Eingang
+  let h = `<section class="karte brief" id="fuer-dich"><div class="brief-kopf">Für dich${fd.length ? ` · ${fd.length}` : ""}</div>`;
+  if (naechster) h += `<div class="fd-termin">${IC.uhr}<span><b>${esc(terminTitel(naechster.titel))}</b> · ${datumKurz(naechster.start)} ${hhmm(naechster.start)} · ${bisText(naechster.start)}${naechster.ort ? " · " + esc(naechster.ort) : ""}</span></div>`;
+  h += fd.length ? `<ul class="brief-liste fd-liste">${fd.map(fdZeile).join("")}</ul>` : `<div class="leer gross">Nichts offen, das dich braucht ✓</div>`;
+  if (erledigt.length) h += `<div class="fd-erledigt tippbar" data-gehe="plan">${IC.ok}<span>Für dich erledigt: ${erledigt.length} in 7 Tagen</span><span class="pfeil">›</span></div>`;
+  h += `</section>`;
   h += einschaetzungKarte("heute");
-  if (ents.length) {
-    h += sek("Entscheide", ents.length);
-    h += `<div class="quer">${ents.map((f, i) => `<article class="karte entscheid" data-id="${f.id}">
-      <div class="meta"><span class="muted">${i + 1} von ${ents.length}</span>${f.frist ? `<span class="chip ${new Date(f.frist) < new Date() ? "rot" : "blau"}">${fristText(f.frist, true)}</span>` : ""}${f.typ === "Bewerbung" ? '<span class="chip">Bewerbung</span>' : ""}</div>
-      <div class="frage">${esc(ohneCode(f.frage))}</div>
-      ${f.kontext ? `<details class="details" data-k="ent-${f.id}"${offen("ent-" + f.id)}><summary>Hintergrund</summary>${esc(f.kontext)}${f.link ? `<br><a ${linkAttr(f.link)}>Öffnen</a>` : ""}</details>` : f.link ? `<div class="details"><a ${linkAttr(f.link)}>Öffnen</a></div>` : ""}
-      <input type="text" class="kommentar" placeholder="Kommentar (freiwillig)" maxlength="500">
-      <div class="antworten seg">${(f.erlaubt?.length ? f.erlaubt : ["Ja", "Nein", "Später"]).map((a) => `<button class="knopf ${/^(ja|einreichen)$/i.test(a) ? "primaer" : ""}" data-antwort="${esc(a)}">${esc(a)}</button>`).join("")}</div></article>`).join("")}</div>`;
-  }
-  if (bitten.length) h += sek("Manager braucht dich", bitten.length) + `<div class="karte liste-karte"><ul class="liste">${bitten.map(aufgabeZeile).join("")}</ul></div>`;
   const sicht = S.mehr ? auf : auf.slice(0, 6);
-  h += sek("Deine Aufgaben", auf.length, `<button class="alle" id="b-filter2">Ausgeblendet</button>`);
+  h += sek("Weitere Aufgaben", auf.length, `<button class="alle" id="b-filter2">Ausgeblendet</button>`);
   h += `<div class="karte liste-karte">${auf.length ? `<ul class="liste">${sicht.map(aufgabeZeile).join("")}</ul>` : `<div class="leer gross">Alles erledigt ✓</div>`}
     ${auf.length > 6 ? `<button class="knopf mehrzeigen" id="mehr">${S.mehr ? "Weniger zeigen" : `Alle ${auf.length} zeigen`}</button>` : ""}<div class="wischhinweis">Nach rechts wischen = erledigt · nach links = später</div></div>`;
   h += lastKarte();
   h += wocheKarte();
-  if (erledigt.length || (d.manager || []).length) {
-    const lauf = (d.manager || []).filter((m) => m.status !== "erledigt" && !/^pre-mortem/i.test(m.titel));
-    h += sek("Für dich erledigt", erledigt.length ? `${erledigt.length} in 7 T` : "");
-    h += `<div class="karte liste-karte"><ul class="liste">${erledigt.slice(0, 6).map((m) => `<li class="zeile-einfach"><span class="haken an">${IC.ok}</span><div><div class="titel">${esc(m.titel)}</div><div class="meta">${m.beleg ? beleg(m.beleg) : "ohne Beleg"} · ${alter(m.geaendert)}</div></div></li>`).join("") || '<li class="leer">Noch nichts diese Woche.</li>'}</ul>
-      ${lauf.length ? `<details class="details" data-k="mgr-lauf"${offen("mgr-lauf")}><summary>${lauf.length} in Arbeit beim Manager</summary><ul class="liste">${lauf.map((m) => `<li><div class="titel" style="font-weight:500">${esc(m.titel)}</div><div class="meta">${m.frist ? fristText(m.frist) : ""}</div></li>`).join("")}</ul></details>` : ""}</div>`;
-  }
   const ein = d.eingaben || [];
   if (ein.length) h += sek("Deine Nachrichten an den Manager") + `<div class="karte"><ul class="liste">${ein.slice(0, 4).map((e) => `<li><div>${esc(e.text)}</div><div class="meta">${alter(e.erstellt)} · ${e.verarbeitet_am ? "✓ " + esc(e.ergebnis || "erledigt") : "wartet auf den nächsten Lauf"}</div></li>`).join("")}</ul></div>`;
   if (!window.matchMedia("(display-mode: standalone)").matches && !navigator.standalone && /iPhone|iPad/.test(navigator.userAgent))
@@ -1103,6 +1144,8 @@ function seitePlan() {
   ms.forEach((m) => { const j = m.datum ? new Date(m.datum).getFullYear() : (m.zeitraum?.match(/20\d\d/)?.[0] || "offen"); (jahre[j] ||= []).push(m); });
   h += sek("Zeitstrahl") + `<div class="karte"><div class="zeitstrahl">${Object.keys(jahre).sort().map((j) => `<div class="jahr">${j}</div>${jahre[j].sort((a, b) => new Date(a.datum || 8e15) - new Date(b.datum || 8e15)).map((m) => `<div class="ms ${m.status === "erledigt" ? "erledigt" : ""} ${wartetJob(m) ? "hohl" : ""}" style="--c:${BEREICH_FARBE[m.bereich] || "var(--accent)"}"><div class="titel" style="font-weight:500">${esc(m.titel)}</div><div class="meta"><span class="chip">${esc(m.bereich)}</span>${wartetJob(m) ? "wartet auf Jobstart" : m.zeitraum ? esc(m.zeitraum) : m.datum ? datumKurz(m.datum) : ""}${m.status !== "geplant" ? ` · ${esc(m.status)}` : ""}</div></div>`).join("")}`).join("") || '<div class="leer">Noch leer.</div>'}</div>
     <div class="legende" style="margin-top:12px">${Object.entries(BEREICH_FARBE).filter(([b]) => ms.some((m) => m.bereich === b)).map(([b, f]) => `<span style="--c:${f}">${b}</span>`).join("")}</div></div>`;
+  h += erledigtKarte();
+  h += pushKarte();
   h += systemKarte();
   return h;
 }
@@ -1133,7 +1176,7 @@ function kopf(titel) {
   if (S.tab === "depot") z.push(ds.depot && tageSeit(ds.depot) > 4 ? "alt" : "");
   const schlecht = z.includes("fehler") ? "fehler" : z.includes("alt") ? "alt" : "";
   let unter = `${S.offline ? "offline · " : ""}Stand ${S.geladen ? alter(S.geladen) : "–"}`;
-  if (S.tab === "heute" && !S.sp) { const hz = heuteZahlen(); unter = `${hz.faellig ? `${hz.faellig} fällig${hz.minuten ? ` · ${hz.minuten} Min.` : ""}` : "nichts fällig"} · ${S.offline ? "offline" : alter(S.geladen)}`; }
+  if (S.tab === "heute" && !S.sp) { const hz = heuteZahlen(); unter = `${hz.n ? `${hz.n} für dich${hz.minuten ? ` · ${hz.minuten} Min.` : ""}` : "nichts für dich"} · ${S.offline ? "offline" : alter(S.geladen)}`; }
   return `<header class="kopf"><div><h1>${titel}</h1><div class="unter"><span class="punkt ${schlecht}" id="b-sync" role="button" aria-label="Datenstand"></span> ${unter}</div></div>
     <div class="rechts"><button class="rund" id="b-speicher" aria-label="Speicher: alle Seiten und Datenbanken">${IC.buch}</button><button class="rund" id="b-neu" aria-label="Neu laden">${IC.neu}</button></div></header>`;
 }
@@ -1177,6 +1220,17 @@ function binden() {
   $$(".aufgabe .haken[data-akt]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); const li = b.closest(".aufgabe"); li.classList.add("weg"); setTimeout(() => aufgabeAktion(li.dataset.id, "erledigt"), 160); });
   $$(".aufgabe").forEach(wischen);
   $$("[data-oeffne]").forEach((x) => x.onclick = () => aufgabeBlatt(x.dataset.oeffne));
+  $$("[data-fd]").forEach((x) => x.onclick = (e) => {
+    if (e.target.closest("[data-fd-akt]")) return;
+    const [art, id] = x.dataset.fd.split(/:(.+)/);
+    if (art === "aufgabe" || art === "bitte") aufgabeBlatt(id);
+    else if (art === "news") { S.tab = "depot"; speicher.set("cockpit-tab", S.tab); window.scrollTo(0, 0); render(); }
+    else entscheidBlatt(id);
+  });
+  $$("[data-fd-akt]").forEach((b) => b.onclick = (e) => {
+    e.stopPropagation(); const li = b.closest("[data-fd]"); li.classList.add("weg");
+    setTimeout(() => aufgabeAktion(li.dataset.fd.split(/:(.+)/)[1], b.dataset.fdAkt), 160);
+  });
   $$("[data-sp]").forEach((x) => x.onclick = (e) => { if (!e.target.closest("a")) location.hash = x.dataset.sp; });
   $$("[data-gehe]").forEach((x) => x.onclick = () => { S.tab = x.dataset.gehe; speicher.set("cockpit-tab", S.tab); window.scrollTo(0, 0); render(); });
   $$("[data-beleg]").forEach((x) => x.onclick = () => belegUmschalten(x.dataset.beleg));
@@ -1495,8 +1549,24 @@ function spBinden() {
   if (s) s.oninput = () => { S.spSuche = s.value; clearTimeout(spBinden.t); spBinden.t = setTimeout(() => { render(); const n = $("#sp-suche"); n.focus(); n.setSelectionRange(n.value.length, n.value.length); }, 250); };
   $$("[data-sf]").forEach((b) => b.onclick = () => { S.spStatus = { ...(S.spStatus || {}), [S.sp.id]: b.dataset.sf }; render(); });
 }
+// Link aus einem Push (Push-Weiche 19.11.2026): #f/freigabe/<id>, #f/aufgabe/<id>, #heute -> Tab Heute, Zeile öffnen
+function fdRoute(h) {
+  S.sp = null; S.tab = "heute"; speicher.set("cockpit-tab", "heute"); window.scrollTo(0, 0); render();
+  history.replaceState(null, "", location.pathname + location.search);
+  const m = h.match(/^#f\/(freigabe|aufgabe)\/([0-9a-f-]{32,36})/i); if (!m || !S.d) return;
+  const id = m[2].toLowerCase(), roh = id.replace(/-/g, "");
+  const aufgabe = (x) => (S.d.aufgaben || []).find((a) => a.id === x || (a.notion_id || "").replace(/-/g, "") === x.replace(/-/g, ""));
+  if (m[1] === "aufgabe") { const a = aufgabe(id); return a ? aufgabeBlatt(a.id) : toast("Schon erledigt oder ausgeblendet."); }
+  if ((S.d.entscheide || []).some((f) => f.id === id || (f.notion_id || "").replace(/-/g, "") === roh)) return entscheidBlatt((S.d.entscheide.find((f) => f.id === id || (f.notion_id || "").replace(/-/g, "") === roh)).id);
+  // Freigabe vom Typ Aufgabe: die Aufgabe selbst öffnen
+  const fa = (S.d.fraufgaben || []).find((f) => f.id === id);
+  const ziel = (String(fa?.ziel || "").replace(/-/g, "").match(/[0-9a-f]{32}/i) || [])[0];
+  const a = ziel && aufgabe(ziel);
+  return a ? aufgabeBlatt(a.id) : toast("Schon beantwortet.");
+}
 async function spRoute() {
   const h = location.hash;
+  if (h.startsWith("#f/") || h === "#heute") return fdRoute(h);
   if (!h.startsWith("#s/")) { if (S.sp) { S.sp = null; render(); } return; }
   const rest = h.slice(3);
   if (!rest) return spOeffnen("start");

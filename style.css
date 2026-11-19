@@ -441,3 +441,17 @@ nav.tabs button { font-size: 11px; }
 }
 .hebel .reihe { flex-wrap: wrap; gap: 2px 8px; }
 .regel .i { min-width: 0; overflow-wrap: anywhere; }
+
+/* Für dich: ein Eingang (Push-Weiche, VR 19.11.2026) */
+.fd-termin { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--text-2); padding: 2px 0 8px; }
+.fd-termin svg { flex: 0 0 auto; }
+.fd-liste li { align-items: center; cursor: pointer; }
+.fd-in { flex: 1 1 auto; min-width: 0; }
+.fd-in .meta { margin-bottom: 3px; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.fd-in .meta .chip { margin-right: 0; }
+.fd-in b { display: block; overflow-wrap: anywhere; }
+.fd-ok { flex: 0 0 auto; width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--line); background: var(--surface); color: var(--good-ink); display: grid; place-items: center; padding: 0; }
+.fd-liste li.weg { opacity: .3; transition: opacity .15s; }
+.fd-erledigt { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--good-ink); padding: 10px 0 8px; border-top: .5px solid var(--line); }
+.fd-erledigt .pfeil { margin-left: auto; color: var(--text-3); }
+.fd-kommentar { width: 100%; box-sizing: border-box; padding: 9px 12px; font-size: 15px; border-radius: 10px; margin: 10px 0 6px; border: 1px solid var(--line); background: var(--surface); color: var(--text); font-family: inherit; }
