@@ -1171,7 +1171,7 @@ function chartsPlan() {
 function kopf(titel) {
   const sync = S.d?.sync || [], ds = datenStand();
   const alt = (q, std) => { const x = sync.find((s) => s.quelle === q); return !x ? "fehler" : !x.ok ? "fehler" : (Date.now() - new Date(x.zuletzt)) / 36e5 > std ? "alt" : ""; };
-  const z = [alt("speicher", 1)];
+  const z = [alt("speicher", 1), alt("push", 0.5)];  // push: Zustand der Push-Weiche, jede Minute
   if (S.tab === "geld") z.push(ds.saldo && tageSeit(ds.saldo) > 35 ? "alt" : "");
   if (S.tab === "depot") z.push(ds.depot && tageSeit(ds.depot) > 4 ? "alt" : "");
   const schlecht = z.includes("fehler") ? "fehler" : z.includes("alt") ? "alt" : "";
