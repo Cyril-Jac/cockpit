@@ -120,6 +120,7 @@ const ABFRAGEN = () => {
     push: (q) => q.from("push_log").select("id,erstellt,quelle,klasse,status,titel,grund,frist,refs,gesendet_am,beantwortet_am,antwort")
       .neq("status", "test").gte("erstellt", new Date(Date.now() - 28 * 864e5).toISOString()).order("erstellt", { ascending: false }).limit(300),
     fraufgaben: (q) => q.from("freigaben").select("id,ziel").eq("status", "offen").eq("typ", "Aufgabe"),
+    aufwand: (q) => q.from("v_cyril_aufwand").select("*").gte("tag", vor45).order("tag", { ascending: false }),
   };
 };
 
@@ -685,6 +686,33 @@ function fensterKarte() {
     <div class="r">${c.datum ? `<div class="meta ${tageBis(c.datum) <= 7 ? "warnt" : ""}">bis ${datumKurz(c.datum)}</div>` : ""}</div></div></li>`).join("") || '<li class="leer">Wird am Montag und Donnerstag vom Redakteur gefüllt: Programme und Einstiegsstellen mit bestätigter Bewerbungsfrist.</li>'}</ul></div>`;
 }
 
+// ---------------------------------------------------------------- Plan: Dein Aufwand (W2.5, Ziel hoechstens 15 Min. pro Tag)
+const AUFWAND_ZIEL = 15;
+function aufwandWerte(zeilen, heuteIso, tage = 7) {
+  const nachTag = new Map((zeilen || []).map((z) => [String(z.tag).slice(0, 10), z]));
+  const t0 = new Date(heuteIso + "T12:00:00");
+  let summe = 0, aktionen = 0, ueber = 0;
+  for (let i = 0; i < tage; i++) {
+    const d = new Date(t0); d.setDate(d.getDate() - i);
+    const z = nachTag.get(isoTag(d));
+    const m = +(z?.minuten || 0);
+    summe += m; aktionen += +(z?.interaktionen || 0); if (m > AUFWAND_ZIEL) ueber++;
+  }
+  const h = nachTag.get(heuteIso) || {};
+  return { heute: +(h.minuten || 0), heuteAktionen: +(h.interaktionen || 0), heuteFreigaben: +(h.freigaben || 0),
+           schnitt: summe / tage, aktionen, ueber, ziel: AUFWAND_ZIEL };
+}
+function aufwandKarte() {
+  const z = S.d?.aufwand; if (!Array.isArray(z)) return "";
+  const w = aufwandWerte(z, isoTag(heute()));
+  const cls = (m) => (m > w.ziel ? "schlecht" : "gut");
+  return sek("Dein Aufwand", "7 Tage") + zeileKpi([
+    { name: "Heute", wert: `${nf0.format(w.heute)}<small> Min.</small>`, cls: cls(w.heute), sub: `${w.heuteAktionen} Aktionen · ${w.heuteFreigaben} Freigaben` },
+    { name: "Ø 7 Tage", wert: `${nf0.format(w.schnitt)}<small> Min.</small>`, cls: cls(w.schnitt), sub: `${w.aktionen} Aktionen · ${w.ueber} ${w.ueber === 1 ? "Tag" : "Tage"} über Ziel` },
+    { name: "Ziel", wert: `≤ ${w.ziel}<small> Min.</small>`, sub: "Schätzung: Aufgaben-Minuten, sonst 2 Min. je Freigabe, Antwort oder Eingabe; Chat-Zeit nicht erfasst" },
+  ]);
+}
+
 // ---------------------------------------------------------------- Plan: Wert und Zustand des Managers
 function systemKarte() {
   const s = S.d?.system; if (!s || Array.isArray(s)) return "";
@@ -1146,6 +1174,7 @@ function seitePlan() {
     <div class="legende" style="margin-top:12px">${Object.entries(BEREICH_FARBE).filter(([b]) => ms.some((m) => m.bereich === b)).map(([b, f]) => `<span style="--c:${f}">${b}</span>`).join("")}</div></div>`;
   h += erledigtKarte();
   h += pushKarte();
+  h += aufwandKarte();
   h += systemKarte();
   return h;
 }
